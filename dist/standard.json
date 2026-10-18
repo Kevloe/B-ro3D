@@ -1,0 +1,510 @@
+{
+  "name": "Testbüro",
+  "floors": [
+    {
+      "id": "f-eg",
+      "name": "Erdgeschoss",
+      "height": 3,
+      "rooms": [
+        {
+          "id": "r-flur",
+          "name": "Flur",
+          "type": "corridor",
+          "x": 0,
+          "z": 5.5,
+          "width": 30,
+          "depth": 2.2,
+          "color": null,
+          "occupant": "",
+          "description": "Hauptflur",
+          "tanks": [],
+          "printers": [
+            {
+              "id": "p-flur",
+              "name": "Drucker Flur",
+              "ip": "192.168.10.50",
+              "x": 15,
+              "z": 0.45
+            }
+          ]
+        },
+        {
+          "id": "r-101",
+          "name": "Büro 101",
+          "type": "office",
+          "x": 1.5,
+          "z": 0,
+          "width": 9,
+          "depth": 5.5,
+          "color": null,
+          "occupant": "Team Vertrieb",
+          "description": "4 Arbeitsplätze",
+          "tanks": [
+            {
+              "id": "t-101-1",
+              "name": "BT 1",
+              "x": 3,
+              "z": 2.75,
+              "ports": [
+                {
+                  "name": "P01/01",
+                  "switch": "Switch 1",
+                  "switchPort": "1"
+                },
+                {
+                  "name": "P01/02",
+                  "switch": "Switch 1",
+                  "switchPort": "2"
+                },
+                {
+                  "name": "P01/03",
+                  "switch": "Switch 1",
+                  "switchPort": "3"
+                },
+                {
+                  "name": "P01/04",
+                  "switch": "Switch 1",
+                  "switchPort": "4"
+                },
+                {
+                  "name": "P01/05",
+                  "switch": "Switch 1",
+                  "switchPort": "5"
+                },
+                {
+                  "name": "P01/06",
+                  "switch": "Switch 1",
+                  "switchPort": "6"
+                }
+              ]
+            },
+            {
+              "id": "t-101-2",
+              "name": "BT 2",
+              "x": 6,
+              "z": 2.75,
+              "ports": [
+                {
+                  "name": "P01/07",
+                  "switch": "Switch 1",
+                  "switchPort": "7"
+                },
+                {
+                  "name": "P01/08",
+                  "switch": "Switch 1",
+                  "switchPort": "8"
+                },
+                {
+                  "name": "P01/09",
+                  "switch": "Switch 1",
+                  "switchPort": "9"
+                },
+                {
+                  "name": "P01/10",
+                  "switch": "Switch 1",
+                  "switchPort": "10"
+                },
+                {
+                  "name": "P01/11",
+                  "switch": "Switch 1",
+                  "switchPort": "11"
+                },
+                {
+                  "name": "P01/12",
+                  "switch": "Switch 1",
+                  "switchPort": "12"
+                }
+              ]
+            }
+          ],
+          "printers": []
+        },
+        {
+          "id": "r-102",
+          "name": "Büro 102",
+          "type": "office",
+          "x": 10.5,
+          "z": 0,
+          "width": 9,
+          "depth": 5.5,
+          "color": null,
+          "occupant": "Team Marketing",
+          "description": "4 Arbeitsplätze",
+          "tanks": [
+            {
+              "id": "t-102-1",
+              "name": "BT 1",
+              "x": 3,
+              "z": 2.75,
+              "ports": [
+                {
+                  "name": "P01/13",
+                  "switch": "Switch 1",
+                  "switchPort": "13"
+                },
+                {
+                  "name": "P01/14",
+                  "switch": "Switch 1",
+                  "switchPort": "14"
+                },
+                {
+                  "name": "P01/15",
+                  "switch": "Switch 1",
+                  "switchPort": "15"
+                },
+                {
+                  "name": "P01/16",
+                  "switch": "Switch 1",
+                  "switchPort": "16"
+                },
+                {
+                  "name": "P01/17",
+                  "switch": "Switch 1",
+                  "switchPort": "17"
+                },
+                {
+                  "name": "P01/18",
+                  "switch": "Switch 1",
+                  "switchPort": "18"
+                }
+              ]
+            },
+            {
+              "id": "t-102-2",
+              "name": "BT 2",
+              "x": 6,
+              "z": 2.75,
+              "ports": [
+                {
+                  "name": "P01/19",
+                  "switch": "Switch 1",
+                  "switchPort": "19"
+                },
+                {
+                  "name": "P01/20",
+                  "switch": "Switch 1",
+                  "switchPort": "20"
+                },
+                {
+                  "name": "P01/21",
+                  "switch": "Switch 1",
+                  "switchPort": "21"
+                },
+                {
+                  "name": "P01/22",
+                  "switch": "Switch 1",
+                  "switchPort": "22"
+                },
+                {
+                  "name": "P01/23",
+                  "switch": "Switch 1",
+                  "switchPort": "23"
+                },
+                {
+                  "name": "P01/24",
+                  "switch": "Switch 1",
+                  "switchPort": "24"
+                }
+              ]
+            }
+          ],
+          "printers": [
+            {
+              "id": "p-102",
+              "name": "Drucker Marketing",
+              "ip": "192.168.10.51",
+              "x": 8.3,
+              "z": 0.5
+            }
+          ]
+        },
+        {
+          "id": "r-103",
+          "name": "Büro 103",
+          "type": "office",
+          "x": 19.5,
+          "z": 0,
+          "width": 9,
+          "depth": 5.5,
+          "color": null,
+          "occupant": "Geschäftsleitung",
+          "description": "2 Arbeitsplätze",
+          "tanks": [
+            {
+              "id": "t-103-1",
+              "name": "BT 1",
+              "x": 3,
+              "z": 2.75,
+              "ports": [
+                {
+                  "name": "P02/01",
+                  "switch": "Switch 1",
+                  "switchPort": "25"
+                },
+                {
+                  "name": "P02/02",
+                  "switch": "Switch 1",
+                  "switchPort": "26"
+                },
+                {
+                  "name": "P02/03",
+                  "switch": "Switch 1",
+                  "switchPort": "27"
+                },
+                {
+                  "name": "P02/04",
+                  "switch": "Switch 1",
+                  "switchPort": "28"
+                },
+                {
+                  "name": "P02/05",
+                  "switch": "Switch 1",
+                  "switchPort": "29"
+                },
+                {
+                  "name": "P02/06",
+                  "switch": "Switch 1",
+                  "switchPort": "30"
+                }
+              ]
+            },
+            {
+              "id": "t-103-2",
+              "name": "BT 2",
+              "x": 6,
+              "z": 2.75,
+              "ports": [
+                {
+                  "name": "P02/07",
+                  "switch": "Switch 1",
+                  "switchPort": "31"
+                },
+                {
+                  "name": "P02/08",
+                  "switch": "Switch 1",
+                  "switchPort": "32"
+                },
+                {
+                  "name": "P02/09",
+                  "switch": "Switch 1",
+                  "switchPort": "33"
+                },
+                {
+                  "name": "P02/10",
+                  "switch": "Switch 1",
+                  "switchPort": "34"
+                },
+                {
+                  "name": "P02/11",
+                  "switch": "Switch 1",
+                  "switchPort": "35"
+                },
+                {
+                  "name": "P02/12",
+                  "switch": "Switch 1",
+                  "switchPort": "36"
+                }
+              ]
+            }
+          ],
+          "printers": []
+        },
+        {
+          "id": "r-104",
+          "name": "Büro 104",
+          "type": "office",
+          "x": 1.5,
+          "z": 7.7,
+          "width": 9,
+          "depth": 5.5,
+          "color": null,
+          "occupant": "Team IT",
+          "description": "5 Arbeitsplätze",
+          "tanks": [
+            {
+              "id": "t-104-1",
+              "name": "BT 1",
+              "x": 3,
+              "z": 2.75,
+              "ports": [
+                {
+                  "name": "P02/13",
+                  "switch": "Switch 1",
+                  "switchPort": "37"
+                },
+                {
+                  "name": "P02/14",
+                  "switch": "Switch 1",
+                  "switchPort": "38"
+                },
+                {
+                  "name": "P02/15",
+                  "switch": "Switch 1",
+                  "switchPort": "39"
+                },
+                {
+                  "name": "P02/16",
+                  "switch": "Switch 1",
+                  "switchPort": "40"
+                },
+                {
+                  "name": "P02/17",
+                  "switch": "Switch 1",
+                  "switchPort": "41"
+                },
+                {
+                  "name": "P02/18",
+                  "switch": "Switch 1",
+                  "switchPort": "42"
+                }
+              ]
+            },
+            {
+              "id": "t-104-2",
+              "name": "BT 2",
+              "x": 6,
+              "z": 2.75,
+              "ports": [
+                {
+                  "name": "P02/19",
+                  "switch": "Switch 1",
+                  "switchPort": "43"
+                },
+                {
+                  "name": "P02/20",
+                  "switch": "Switch 1",
+                  "switchPort": "44"
+                },
+                {
+                  "name": "P02/21",
+                  "switch": "Switch 1",
+                  "switchPort": "45"
+                },
+                {
+                  "name": "P02/22",
+                  "switch": "Switch 1",
+                  "switchPort": "46"
+                },
+                {
+                  "name": "P02/23",
+                  "switch": "Switch 1",
+                  "switchPort": "47"
+                },
+                {
+                  "name": "P02/24",
+                  "switch": "Switch 1",
+                  "switchPort": "48"
+                }
+              ]
+            }
+          ],
+          "printers": []
+        },
+        {
+          "id": "r-105",
+          "name": "Besprechung 105",
+          "type": "meeting",
+          "x": 10.5,
+          "z": 7.7,
+          "width": 9,
+          "depth": 5.5,
+          "color": null,
+          "occupant": "",
+          "description": "12 Sitzplätze, Beamer",
+          "tanks": [
+            {
+              "id": "t-105-1",
+              "name": "BT 1",
+              "x": 3,
+              "z": 2.75,
+              "ports": [
+                {
+                  "name": "P03/01",
+                  "switch": "Switch 2",
+                  "switchPort": "1"
+                },
+                {
+                  "name": "P03/02",
+                  "switch": "Switch 2",
+                  "switchPort": "2"
+                },
+                {
+                  "name": "P03/03",
+                  "switch": "Switch 2",
+                  "switchPort": "3"
+                },
+                {
+                  "name": "P03/04",
+                  "switch": "Switch 2",
+                  "switchPort": "4"
+                }
+              ]
+            },
+            {
+              "id": "t-105-2",
+              "name": "BT 2",
+              "x": 6,
+              "z": 2.75,
+              "ports": [
+                {
+                  "name": "P03/05",
+                  "switch": "Switch 2",
+                  "switchPort": "5"
+                },
+                {
+                  "name": "P03/06",
+                  "switch": "Switch 2",
+                  "switchPort": "6"
+                },
+                {
+                  "name": "P03/07",
+                  "switch": "Switch 2",
+                  "switchPort": "7"
+                },
+                {
+                  "name": "P03/08",
+                  "switch": "Switch 2",
+                  "switchPort": "8"
+                }
+              ]
+            }
+          ],
+          "printers": []
+        },
+        {
+          "id": "r-106",
+          "name": "Teeküche 106",
+          "type": "kitchen",
+          "x": 19.5,
+          "z": 7.7,
+          "width": 9,
+          "depth": 5.5,
+          "color": null,
+          "occupant": "",
+          "description": "Kaffee, Kühlschrank, Spülmaschine",
+          "tanks": [
+            {
+              "id": "t-106-1",
+              "name": "BT 1",
+              "x": 4.5,
+              "z": 2.75,
+              "ports": [
+                {
+                  "name": "P03/09",
+                  "switch": "Switch 2",
+                  "switchPort": "9"
+                },
+                {
+                  "name": "P03/10",
+                  "switch": "Switch 2",
+                  "switchPort": "10"
+                }
+              ]
+            }
+          ],
+          "printers": []
+        }
+      ]
+    }
+  ]
+}
