@@ -18,6 +18,26 @@ const IS_FILE = location.protocol === 'file:';
 
 const fingerprint = (building) => JSON.stringify(building);
 
+/**
+ * Undo-Schritte ohne eingebettete Bilder: Hintergrundbilder (data:-URLs, oft mehrere 100 kB)
+ * werden einmal hier abgelegt und im Schritt nur referenziert.
+ */
+const imagePool = new Map(); // Referenz -> data:-URL
+const imageRefs = new Map(); // data:-URL -> Referenz
+const toSnapshot = (building) =>
+  JSON.stringify(building, (key, value) => {
+    if (key !== 'src' || typeof value !== 'string' || !value.startsWith('data:')) return value;
+    let ref = imageRefs.get(value);
+    if (!ref) {
+      ref = `pool:${imagePool.size + 1}`;
+      imagePool.set(ref, value);
+      imageRefs.set(value, ref);
+    }
+    return ref;
+  });
+const fromSnapshot = (json) =>
+  JSON.parse(json, (key, value) => (key === 'src' && imagePool.has(value) ? imagePool.get(value) : value));
+
 function readDraft() {
   try {
     const raw = localStorage.getItem(DRAFT_KEY);
@@ -126,7 +146,7 @@ class Store extends EventTarget {
 
   /** Speichert den aktuellen Stand als Undo-Schritt (z. B. einmal zu Beginn eines Ziehens). */
   checkpoint() {
-    this.undoStack.push(JSON.stringify(this.building));
+    this.undoStack.push(toSnapshot(this.building));
     if (this.undoStack.length > MAX_UNDO) this.undoStack.shift();
     this.redoStack = [];
   }
@@ -146,15 +166,15 @@ class Store extends EventTarget {
 
   undo() {
     if (!this.canUndo) return;
-    this.redoStack.push(JSON.stringify(this.building));
-    this.building = JSON.parse(this.undoStack.pop());
+    this.redoStack.push(toSnapshot(this.building));
+    this.building = fromSnapshot(this.undoStack.pop());
     this.commit('undo');
   }
 
   redo() {
     if (!this.canRedo) return;
-    this.undoStack.push(JSON.stringify(this.building));
-    this.building = JSON.parse(this.redoStack.pop());
+    this.undoStack.push(toSnapshot(this.building));
+    this.building = fromSnapshot(this.redoStack.pop());
     this.commit('redo');
   }
 

@@ -8,6 +8,7 @@ import {
   createTank,
   defaultFloorName,
   floorBounds,
+  groundIndex,
   isValidIp,
   nextPrinterName,
   nextTankName,
@@ -26,7 +27,27 @@ import {
 } from '../data/ports.js';
 import { ROOM_TYPES, roomColor } from '../data/roomTypes.js';
 import { createSampleBuilding } from '../data/sampleBuilding.js';
-import { rotateStairDir, STAIR_DIRS, STAIR_SHAPES, stairLayout } from '../data/stairs.js';
+import {
+  ELEVATOR_MIN_WIDTH,
+  elevatorFits,
+  rotateStairDir,
+  STAIR_DIRS,
+  STAIR_SHAPES,
+  stairLayout,
+} from '../data/stairs.js';
+import { WALL_THICKNESS } from '../three/walls.js';
+import {
+  clampCut,
+  CUT_CORNERS,
+  defaultCut,
+  pointInRoom,
+  ROOM_SHAPES,
+  roomArea,
+  roomLabelPoint,
+  roomPolygon,
+  roomShape,
+  roomsOverlap,
+} from '../data/shape.js';
 import { BuildingView } from '../three/BuildingView.js';
 import { clamp, esc, fmt } from '../utils.js';
 
@@ -34,6 +55,8 @@ const MIN_SIZE = 1;
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const TANK_SNAP = 0.1;
 const MAX_PORTS = 96;
+const UNDERLAY_MAX_PX = 2400; // Hintergrundbilder werden beim Laden auf diese Kantenlänge verkleinert
+const UNDERLAY_OPACITY = 0.15;
 
 export function createEditor(root) {
   root.innerHTML = `
@@ -42,7 +65,8 @@ export function createEditor(root) {
         <div class="tb-group">
           <span class="tb-label">Etage</span>
           <select id="e-floor" class="input sm"></select>
-          <button class="btn sm" data-act="floor-add" title="Neue Etage oben anlegen">+ Etage</button>
+          <button class="btn sm" data-act="floor-add" title="Neues Obergeschoss oben anlegen">+ OG</button>
+          <button class="btn sm" data-act="floor-add-below" title="Neues Untergeschoss unten anlegen">+ UG</button>
           <button class="btn sm" data-act="floor-dup" title="Aktuelle Etage darüber kopieren">Duplizieren</button>
           <button class="btn sm" data-act="floor-up" title="Etage nach oben verschieben">↑</button>
           <button class="btn sm" data-act="floor-down" title="Etage nach unten verschieben">↓</button>
@@ -81,7 +105,12 @@ export function createEditor(root) {
       </div>
       <div class="editor-main">
         <div class="plan-wrap" id="e-plan-wrap">
-          <svg id="e-plan" xmlns="http://www.w3.org/2000/svg"></svg>
+          <svg id="e-plan" xmlns="http://www.w3.org/2000/svg">
+            <g id="e-plan-bg"></g>
+            <image id="e-plan-underlay" class="underlay" preserveAspectRatio="none" style="display:none"/>
+            <g id="e-plan-fg"></g>
+          </svg>
+          <input type="file" id="e-underlay-file" accept="image/*" hidden>
           <div class="plan-hud">
             <button class="icon-btn" data-act="zoom-in" title="Hineinzoomen">+</button>
             <button class="icon-btn" data-act="zoom-out" title="Herauszoomen">−</button>
@@ -108,9 +137,14 @@ export function createEditor(root) {
   const $ = (sel) => root.querySelector(sel);
   const svg = $('#e-plan');
   const planWrap = $('#e-plan-wrap');
+  // Ebenen: Raster – Hintergrundbild – Räume. Das Bild bleibt stehen und wird nicht bei jedem Rendern neu geparst.
+  const bgLayer = $('#e-plan-bg');
+  const fgLayer = $('#e-plan-fg');
+  const underlayEl = $('#e-plan-underlay');
+  let underlaySrc = null;
 
   const state = {
-    floorId: store.building.floors[0]?.id,
+    floorId: store.building.groundFloorId ?? store.building.floors[0]?.id,
     selectedRoomId: null,
     selectedTankId: null,
     selectedPrinterId: null,
@@ -121,6 +155,7 @@ export function createEditor(root) {
   const plan = { cx: 15, cz: 6, scale: 30 }; // scale = Pixel pro Meter
   let drag = null;
   let draftRect = null;
+  let calib = null; // Maßstab setzen: { a: [x, z], b, hover }
   // 'props' | 'modal': dieses Formular beim nächsten Render nicht neu zeichnen, damit der Fokus bleibt
   let changeSource = null;
   let lastTankClick = { id: null, time: 0 };
@@ -164,9 +199,7 @@ export function createEditor(root) {
 
   /** Oberster Raum unter einem Punkt (Räume vor Fluren). */
   function roomAt(p) {
-    const hits = currentFloor().rooms.filter(
-      (r) => p.x >= r.x && p.x <= r.x + r.width && p.z >= r.z && p.z <= r.z + r.depth,
-    );
+    const hits = currentFloor().rooms.filter((r) => pointInRoom(r, [p.x, p.z]));
     return hits.find((r) => r.type !== 'corridor') ?? hits[0] ?? null;
   }
 
@@ -205,15 +238,23 @@ export function createEditor(root) {
     renderPlan();
   }
 
+  /** Ecke mit der Aussparung und der innere Punkt der Aussparung (Griff zum Ändern der Größe). */
+  function cutHandle(r) {
+    const east = r.cutCorner === 'ne' || r.cutCorner === 'se';
+    const north = r.cutCorner === 'nw' || r.cutCorner === 'ne';
+    const corner = [east ? r.x + r.width : r.x, north ? r.z : r.z + r.depth];
+    const point = [corner[0] + (east ? -r.cutW : r.cutW), corner[1] + (north ? r.cutD : -r.cutD)];
+    return { corner, point, east, north };
+  }
+
+  const areaText = (v) => `${fmt(v, 2)} m²`;
+  const floorArea = (floor) => floor.rooms.reduce((sum, r) => sum + roomArea(r), 0);
+
   function overlappingIds(rooms) {
     const ids = new Set();
     for (let i = 0; i < rooms.length; i++) {
       for (let j = i + 1; j < rooms.length; j++) {
-        const a = rooms[i];
-        const b = rooms[j];
-        const w = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
-        const d = Math.min(a.z + a.depth, b.z + b.depth) - Math.max(a.z, b.z);
-        if (w > 0.01 && d > 0.01) ids.add(a.id).add(b.id);
+        if (roomsOverlap(rooms[i], rooms[j])) ids.add(rooms[i].id).add(rooms[j].id);
       }
     }
     return ids;
@@ -237,7 +278,7 @@ export function createEditor(root) {
     const major = s < 10 ? 25 : 5;
     const parts = [];
 
-    parts.push(`
+    const bgHtml = `
       <defs>
         <pattern id="g-minor" width="${minor}" height="${minor}" patternUnits="userSpaceOnUse">
           <path d="M ${minor} 0 L 0 0 0 ${minor}" fill="none" stroke="#e4e8ee" stroke-width="${px}"/>
@@ -248,7 +289,7 @@ export function createEditor(root) {
       </defs>
       <rect x="${x0}" y="${z0}" width="${W / s}" height="${H / s}" fill="url(#g-minor)"/>
       <rect x="${x0}" y="${z0}" width="${W / s}" height="${H / s}" fill="url(#g-major)"/>
-      <path d="M ${x0} 0 H ${x0 + W / s} M 0 ${z0} V ${z0 + H / s}" stroke="#aeb7c3" stroke-width="${px}"/>`);
+      <path d="M ${x0} 0 H ${x0 + W / s} M 0 ${z0} V ${z0 + H / s}" stroke="#aeb7c3" stroke-width="${px}"/>`;
 
     // Etage darunter als Referenz
     const idx = floors().indexOf(floor);
@@ -256,7 +297,7 @@ export function createEditor(root) {
     if (below) {
       for (const r of below.rooms) {
         parts.push(
-          `<rect class="ref-room" x="${r.x}" y="${r.z}" width="${r.width}" height="${r.depth}"
+          `<polygon class="ref-room" points="${roomPolygon(r).join(' ')}"
             stroke-width="${px}" stroke-dasharray="${4 * px} ${3 * px}"/>`,
         );
       }
@@ -268,15 +309,20 @@ export function createEditor(root) {
     for (const r of ordered) {
       const sel = r.id === state.selectedRoomId;
       const showText = r.width * s > 44 && r.depth * s > 26;
+      // Rechteck: Name oben (Treppensymbol bleibt frei), sonst in der Mitte des größten Teils
+      const [tx, tz] =
+        roomShape(r) === 'rect' ? [r.x + r.width / 2, r.z + 16 * px] : roomLabelPoint(r).map((v, i) => v - (i ? 7 * px : 0));
       parts.push(`
         <g class="room${sel ? ' selected' : ''}${overlaps.has(r.id) ? ' overlap' : ''}" data-room="${r.id}">
-          <rect x="${r.x}" y="${r.z}" width="${r.width}" height="${r.depth}"
+          <polygon class="room-shape" points="${roomPolygon(r).join(' ')}"
             fill="${roomColor(r)}" fill-opacity="${r.type === 'corridor' ? 0.35 : 0.55}"
-            stroke-width="${(sel ? 2.5 : 1.25) * px}"/>
+            stroke-width="${(sel ? 2.5 : 1.25) * px}" stroke-linejoin="round"/>
           ${r.type === 'stairs' && hasFloorAbove ? renderStairs(r, floor.height, px) : ''}
+          ${r.type === 'stairs' ? renderElevator(r, floor.height, px) : ''}
           ${
             showText
-              ? `<text x="${r.x + r.width / 2}" y="${r.z + 16 * px}" font-size="${13 * px}" class="room-name">${esc(r.name)}</text>`
+              ? `<text x="${tx}" y="${tz}" font-size="${13 * px}" class="room-name">${esc(r.name)}</text>
+                 <text x="${tx}" y="${tz + 15 * px}" font-size="${11 * px}" class="room-area">${areaText(roomArea(r))}</text>`
               : ''
           }
         </g>`);
@@ -350,6 +396,20 @@ export function createEditor(root) {
             width="${hs}" height="${hs}" stroke-width="${1.5 * px}"/>`,
         );
       }
+      if (roomShape(sel) !== 'rect') {
+        const { corner, point } = cutHandle(sel);
+        const [cx, cz] = point;
+        const guide =
+          roomShape(sel) === 'chamfer'
+            ? `<path class="cut-guide" d="M ${cx} ${corner[1]} L ${cx} ${cz} L ${corner[0]} ${cz}"
+                stroke-width="${px}" stroke-dasharray="${4 * px} ${3 * px}"/>`
+            : '';
+        parts.push(`
+          ${guide}
+          <path class="handle handle-cut" data-handle="cut"
+            d="M ${cx} ${cz - hs * 0.75} L ${cx + hs * 0.75} ${cz} L ${cx} ${cz + hs * 0.75} L ${cx - hs * 0.75} ${cz} Z"
+            stroke-width="${1.5 * px}"/>`);
+      }
     }
 
     if (draftRect) {
@@ -361,8 +421,113 @@ export function createEditor(root) {
           ${fmt(width, 2)} × ${fmt(depth, 2)} m</text>`);
     }
 
-    svg.innerHTML = parts.join('');
+    if (calib) {
+      const [ax, az] = calib.a;
+      const [bx, bz] = calib.b ?? calib.hover;
+      parts.push(`
+        <g class="calib">
+          <path d="M ${ax} ${az} L ${bx} ${bz}" stroke-width="${2 * px}"/>
+          <circle cx="${ax}" cy="${az}" r="${4 * px}" stroke-width="${1.5 * px}"/>
+          <circle cx="${bx}" cy="${bz}" r="${4 * px}" stroke-width="${1.5 * px}"/>
+          <text class="dim" x="${(ax + bx) / 2}" y="${(az + bz) / 2 - 12 * px}" font-size="${12 * px}">${fmt(Math.hypot(bx - ax, bz - az), 2)} m</text>
+        </g>`);
+    }
+
+    bgLayer.innerHTML = bgHtml;
+    fgLayer.innerHTML = parts.join('');
+    renderUnderlay(floor);
     planWrap.dataset.tool = state.tool;
+  }
+
+  /** Hintergrundbild der Etage: nur Attribute setzen, das Bild selbst nur bei Wechsel. */
+  function renderUnderlay(floor) {
+    const u = floor.underlay;
+    underlayEl.style.display = u?.visible ? '' : 'none';
+    if (!u?.visible) return;
+    if (underlaySrc !== u.src) {
+      underlayEl.setAttribute('href', u.src);
+      underlaySrc = u.src;
+    }
+    underlayEl.setAttribute('x', u.x);
+    underlayEl.setAttribute('y', u.z);
+    underlayEl.setAttribute('width', u.width);
+    underlayEl.setAttribute('height', u.width * u.ratio);
+    underlayEl.setAttribute('opacity', u.opacity);
+  }
+
+  /** Bilddatei verkleinern und komprimieren (WebP, sonst JPEG), damit der Entwurf in den Browser-Speicher passt. */
+  async function readUnderlayFile(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      // SVG ohne feste Größe meldet 0
+      const nw = img.naturalWidth || 1600;
+      const nh = img.naturalHeight || 1200;
+      const k = Math.min(1, UNDERLAY_MAX_PX / Math.max(nw, nh));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(nw * k));
+      canvas.height = Math.max(1, Math.round(nh * k));
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      let src = canvas.toDataURL('image/webp', 0.7);
+      if (!src.startsWith('data:image/webp')) src = canvas.toDataURL('image/jpeg', 0.75);
+      return { src, ratio: canvas.height / canvas.width };
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function loadUnderlay(file) {
+    let image;
+    try {
+      image = await readUnderlayFile(file);
+    } catch {
+      alert('Das Bild konnte nicht gelesen werden. Unterstützt werden Bilddateien wie PNG, JPG, WebP oder SVG – PDF-Pläne bitte vorher als Bild exportieren.');
+      return;
+    }
+    const old = currentFloor().underlay;
+    let place = old && { x: old.x, z: old.z, width: old.width };
+    if (!place) {
+      // neues Bild: in den sichtbaren Ausschnitt einpassen, danach mit „Maßstab setzen“ ausrichten
+      const vw = (svg.clientWidth || 600) / plan.scale;
+      const vh = (svg.clientHeight || 400) / plan.scale;
+      const width = round2(0.8 * Math.min(vw, vh / image.ratio));
+      place = { x: round2(plan.cx - width / 2), z: round2(plan.cz - (width * image.ratio) / 2), width };
+    }
+    store.mutate((b) => {
+      b.floors.find((f) => f.id === state.floorId).underlay = {
+        ...image,
+        ...place,
+        opacity: old?.opacity ?? UNDERLAY_OPACITY,
+        visible: true,
+      };
+    });
+  }
+
+  /** Zwei Punkte einer bekannten Strecke angeklickt: Bild so skalieren, dass sie die echte Länge hat. */
+  function finishCalibration() {
+    const [ax, az] = calib.a;
+    const [bx, bz] = calib.b;
+    const measured = Math.hypot(bx - ax, bz - az);
+    renderPlan();
+    const input = measured > 0.05 ? prompt(`Wie lang ist diese Strecke in Wirklichkeit (in m)?\nIm Moment: ${fmt(measured, 2)} m`, fmt(measured, 2)) : null;
+    calib = null;
+    const real = parseFloat(String(input ?? '').replace(',', '.'));
+    if (!(real > 0)) return renderPlan();
+    const k = real / measured;
+    const r3 = (v) => Math.round(v * 1000) / 1000;
+    store.mutate((b) => {
+      const u = b.floors.find((f) => f.id === state.floorId).underlay;
+      // der erste Punkt bleibt, wo er ist
+      u.x = r3(ax - (ax - u.x) * k);
+      u.z = r3(az - (az - u.z) * k);
+      u.width = r3(u.width * k);
+    });
+    setTool('select');
   }
 
   /** Stufen als Linien, Podest und Pfeil in Laufrichtung (Grundriss-Symbol einer Treppe). */
@@ -387,6 +552,23 @@ export function createEditor(root) {
       </g>`;
   }
 
+  /** Aufzug als Grundriss-Symbol: Schacht mit Kreuz, Tür zum Podest. */
+  function renderElevator(room, height, px) {
+    const lift = stairLayout(room, height).elevator;
+    if (!lift) return '';
+    const { x, z, w, d } = lift.shaft;
+    const walls = lift.walls.map((r) => `<rect x="${r.x}" y="${r.z}" width="${r.w}" height="${r.d}"/>`).join('');
+    const door = lift.door;
+    return `
+      <g class="lift" stroke-width="${px}">
+        <rect class="lift-shaft" x="${x}" y="${z}" width="${w}" height="${d}"/>
+        <path class="lift-cross" d="M ${x} ${z} L ${x + w} ${z + d} M ${x + w} ${z} L ${x} ${z + d}"/>
+        <g class="lift-walls">${walls}</g>
+        <rect class="lift-door" x="${door.x}" y="${door.z}" width="${door.w}" height="${door.d}"/>
+        ${w * plan.scale > 40 ? `<text x="${x + w / 2}" y="${z + d / 2}" font-size="${10 * px}">Aufzug</text>` : ''}
+      </g>`;
+  }
+
   function renderToolbar() {
     $('#e-floor').innerHTML = [...floors()]
       .reverse()
@@ -404,8 +586,10 @@ export function createEditor(root) {
       stairs: 'Treppenhaus zeichnen: Rechteck aufziehen · Form und Laufrichtung rechts einstellen · Esc zum Beenden',
       tank: 'Bodentank setzen: in einen Raum klicken · Esc zum Beenden',
       printer: 'Drucker setzen: in einen Raum oder Flur klicken · Esc zum Beenden',
+      calibrate: 'Maßstab setzen: Anfang und Ende einer bekannten Strecke im Hintergrundbild anklicken, dann die echte Länge eingeben · Esc zum Beenden',
+      underlay: 'Hintergrundbild verschieben: im Grundriss ziehen · Esc zum Beenden',
       select:
-        'Klicken = auswählen · Ziehen = verschieben · Griffe = Größe ändern · Doppelklick auf Bodentank = Ports bearbeiten · P = Drucker setzen · Alt = ohne Raster',
+        'Klicken = auswählen · Ziehen = verschieben · Griffe = Größe ändern · Raute = Aussparung/Schräge · Doppelklick auf Bodentank = Ports bearbeiten · P = Drucker setzen · Alt = ohne Raster',
     }[state.tool];
   }
 
@@ -581,6 +765,7 @@ export function createEditor(root) {
             ${room.color ? `<button class="btn sm" data-act="color-reset">Typfarbe</button>` : `<span class="muted">Typfarbe</span>`}
           </div>
         </div>
+        ${room.type !== 'stairs' ? renderShapeFields(room) : ''}
         ${
           room.type === 'stairs'
             ? `<label class="field"><span>Treppenform</span><select class="input" data-bind="room:stairShape">${Object.entries(STAIR_SHAPES)
@@ -599,7 +784,9 @@ export function createEditor(root) {
               ? `<span class="hint-text">Oberste Etage: Hier führt keine Treppe weiter nach oben.</span>`
               : ''
           }
-        </div>`
+        </div>
+        <label class="check"><input type="checkbox" data-bind="room:elevator" ${room.elevator ? 'checked' : ''}> Aufzug in der Mitte</label>
+        ${room.elevator ? elevatorHint(room) : ''}`
             : ''
         }
         <label class="field"><span>Nutzer / Team</span><input class="input" data-bind="room:occupant" value="${esc(room.occupant)}" placeholder="z. B. Team Vertrieb"></label>
@@ -610,6 +797,7 @@ export function createEditor(root) {
           <label class="field"><span>Breite (m)</span><input class="input" type="number" step="0.1" min="0.5" data-bind="room:width" value="${round2(room.width)}"></label>
           <label class="field"><span>Tiefe (m)</span><input class="input" type="number" step="0.1" min="0.5" data-bind="room:depth" value="${round2(room.depth)}"></label>
         </div>
+        <div class="area-row"><span>Fläche</span><strong data-out="room-area">${areaText(roomArea(room))}</strong></div>
         <div class="field">
           <span>Bodentanks</span>
           <div class="tank-list">
@@ -663,11 +851,93 @@ export function createEditor(root) {
         <h2 class="panel-title">Etage</h2>
         <label class="field"><span>Name</span><input class="input" data-bind="floor:name" value="${esc(floor.name)}"></label>
         <label class="field"><span>Geschosshöhe (m)</span><input class="input" type="number" step="0.1" min="2" max="10" data-bind="floor:height" value="${floor.height}"></label>
+        <div class="area-row"><span>Fläche aller Räume</span><strong data-out="floor-area">${areaText(floorArea(floor))}</strong></div>
+        ${renderUnderlayFields(floor)}
+        ${
+          floor.id === b.groundFloorId
+            ? `<span class="hint-text">Erdgeschoss (Geländehöhe). Etagen darunter sind Untergeschosse.</span>`
+            : `<button class="btn sm" data-act="floor-ground" title="Diese Etage liegt auf Geländehöhe; alle darunter werden Untergeschosse">Als Erdgeschoss festlegen</button>`
+        }
       </section>
       <section class="panel">
         <h2 class="panel-title">Gebäude</h2>
         <label class="field"><span>Name</span><input class="input" data-bind="building:name" value="${esc(b.name)}"></label>
       </section>`;
+  }
+
+  function renderUnderlayFields(floor) {
+    const u = floor.underlay;
+    if (!u)
+      return `
+        <div class="field">
+          <span>Hintergrundbild</span>
+          <button class="btn sm" data-act="underlay-load">Bild laden …</button>
+          <span class="hint-text">Grundriss-Zeichnung als schwache Vorlage zum Nachzeichnen. Nur im Editor sichtbar.</span>
+        </div>`;
+    const kb = Math.round((u.src.length * 0.75) / 1024);
+    return `
+        <div class="field underlay-fields">
+          <span>Hintergrundbild <span class="muted">· ${kb} kB</span></span>
+          <label class="check"><input type="checkbox" data-bind="underlay:visible" ${u.visible ? 'checked' : ''}> anzeigen</label>
+          <label class="range"><span>Deckkraft</span>
+            <input type="range" min="0.05" max="0.6" step="0.05" data-bind="underlay:opacity" value="${u.opacity}">
+          </label>
+          <div class="field-grid">
+            <label class="field"><span>Breite (m)</span><input class="input" type="number" step="0.1" min="0.5" data-bind="underlay:width" value="${round2(u.width)}"></label>
+            <span></span>
+            <label class="field"><span>X (m)</span><input class="input" type="number" step="0.1" data-bind="underlay:x" value="${round2(u.x)}"></label>
+            <label class="field"><span>Z (m)</span><input class="input" type="number" step="0.1" data-bind="underlay:z" value="${round2(u.z)}"></label>
+          </div>
+          <div class="btn-row">
+            <button class="btn sm${state.tool === 'calibrate' ? ' active' : ''}" data-act="underlay-calibrate" title="Zwei Punkte einer bekannten Strecke anklicken">Maßstab setzen</button>
+            <button class="btn sm${state.tool === 'underlay' ? ' active' : ''}" data-act="underlay-move">Verschieben</button>
+          </div>
+          <div class="btn-row">
+            <button class="btn sm" data-act="underlay-load">Ersetzen …</button>
+            <button class="btn sm danger" data-act="underlay-del">Entfernen</button>
+          </div>
+        </div>`;
+  }
+
+  function elevatorHint(room) {
+    if (room.stairShape === 'straight')
+      return `<span class="field-warn">Der Aufzug sitzt im Treppenauge – dafür eine zweiläufige Treppenform wählen.</span>`;
+    if (!elevatorFits(room)) {
+      const need = fmt(ELEVATOR_MIN_WIDTH + WALL_THICKNESS * 2, 2);
+      return `<span class="field-warn">Zu schmal für einen Aufzug: quer zur Laufrichtung mindestens ${need} m nötig.</span>`;
+    }
+    return `<span class="hint-text">Der Schacht steht zwischen den Läufen, die Tür zeigt zum Geschosspodest. Er wird auf jeder Etage gezeichnet.</span>`;
+  }
+
+  /** Raumform: Rechteck, L-Form oder schräge Wand an einer Ecke. */
+  function renderShapeFields(room) {
+    const shape = roomShape(room);
+    const buttons = Object.entries(ROOM_SHAPES)
+      .map(
+        ([k, l]) =>
+          `<button class="btn sm${shape === k ? ' active' : ''}" data-act="room-shape" data-shape="${k}">${esc(l)}</button>`,
+      )
+      .join('');
+    const field = `<div class="field"><span>Form</span><div class="seg seg-fill">${buttons}</div></div>`;
+    if (shape === 'rect') return field;
+    const corners = Object.entries(CUT_CORNERS)
+      .map(([k, l]) => `<option value="${k}" ${room.cutCorner === k ? 'selected' : ''}>${esc(l)}</option>`)
+      .join('');
+    const [lw, ld] = shape === 'l' ? ['Aussparung Breite', 'Aussparung Tiefe'] : ['Schräge in X', 'Schräge in Z'];
+    return `
+        ${field}
+        <div class="field">
+          <span>${shape === 'l' ? 'Aussparung an Ecke' : 'Schräge an Ecke'}</span>
+          <div class="color-row">
+            <select class="input" data-bind="room:cutCorner">${corners}</select>
+            <button class="btn sm" data-act="cut-rotate" title="Zur nächsten Ecke (im Uhrzeigersinn)">↻</button>
+          </div>
+        </div>
+        <div class="field-grid">
+          <label class="field"><span>${lw} (m)</span><input class="input" type="number" step="0.1" min="0.5" data-bind="room:cutW" value="${round2(room.cutW)}"></label>
+          <label class="field"><span>${ld} (m)</span><input class="input" type="number" step="0.1" min="0.5" data-bind="room:cutD" value="${round2(room.cutD)}"></label>
+        </div>
+        <span class="hint-text">Größe auch über den Rauten-Griff im Grundriss änderbar.</span>`;
   }
 
   function renderRoomList() {
@@ -678,13 +948,22 @@ export function createEditor(root) {
             (r) => `
         <button class="room-item ${r.id === state.selectedRoomId ? 'active' : ''}" data-room="${r.id}">
           <span class="swatch" style="background:${roomColor(r)}"></span>
-          <span class="ri-text"><span class="ri-name">${esc(r.name)}</span></span>
+          <span class="ri-text"><span class="ri-name">${esc(r.name)}</span><span class="ri-sub">${areaText(roomArea(r))}</span></span>
           ${r.printers.length ? `<span class="ri-meta" title="Drucker">${r.printers.length} DR</span>` : ''}
           ${r.tanks.length ? `<span class="ri-meta" title="Bodentanks">${r.tanks.length} BT</span>` : ''}
         </button>`,
           )
           .join('')
       : `<div class="empty">Noch keine Räume.</div>`;
+  }
+
+  /** Flächenangaben aktualisieren, ohne das Formular neu zu zeichnen (Fokus bleibt). */
+  function updateAreas() {
+    const room = selectedRoom();
+    const roomOut = root.querySelector('[data-out="room-area"]');
+    if (room && roomOut) roomOut.textContent = areaText(roomArea(room));
+    const floorOut = root.querySelector('[data-out="floor-area"]');
+    if (floorOut) floorOut.textContent = areaText(floorArea(currentFloor()));
   }
 
   function renderAll() {
@@ -737,15 +1016,22 @@ export function createEditor(root) {
   }
 
   function setTool(tool) {
+    // Die Knöpfe „Maßstab setzen“ / „Verschieben“ in der Seitenleiste zeigen den Modus an
+    const panelTool = [state.tool, tool].some((t) => t === 'calibrate' || t === 'underlay');
+    if (tool !== 'calibrate') calib = null;
     state.tool = tool;
     renderToolbar();
     renderPlan();
+    if (panelTool) renderProps();
   }
 
   function addRoom(props) {
     const floor = currentFloor();
     const room = createRoom({ name: `Raum ${floor.rooms.length + 1}`, ...props });
+    const wasEmpty = !floor.rooms.length;
     store.mutate((b) => b.floors.find((f) => f.id === floor.id).rooms.push(room));
+    // erster Raum einer Etage: 3D-Vorschau auf ihn ausrichten
+    if (wasEmpty) preview.fitAll();
     select(room.id);
   }
 
@@ -867,9 +1153,29 @@ export function createEditor(root) {
 
   const actions = {
     'floor-add': () => {
-      const floor = createFloor({ name: defaultFloorName(floors().length), height: currentFloor()?.height ?? 3 });
+      const level = floors().length - groundIndex(store.building);
+      const floor = createFloor({ name: defaultFloorName(level), height: currentFloor()?.height ?? 3 });
       store.mutate((b) => b.floors.push(floor));
       setFloor(floor.id);
+    },
+    'floor-add-below': () => {
+      const level = -groundIndex(store.building) - 1;
+      const floor = createFloor({ name: defaultFloorName(level), height: currentFloor()?.height ?? 3 });
+      store.mutate((b) => b.floors.unshift(floor));
+      setFloor(floor.id);
+    },
+    'underlay-load': () => $('#e-underlay-file').click(),
+    'underlay-del': () => {
+      store.mutate((b) => delete b.floors.find((f) => f.id === state.floorId).underlay);
+      if (state.tool === 'calibrate' || state.tool === 'underlay') setTool('select');
+    },
+    'underlay-calibrate': () => {
+      calib = null;
+      setTool(state.tool === 'calibrate' ? 'select' : 'calibrate');
+    },
+    'underlay-move': () => setTool(state.tool === 'underlay' ? 'select' : 'underlay'),
+    'floor-ground': () => {
+      store.mutate((b) => (b.groundFloorId = state.floorId));
     },
     'floor-dup': () => {
       const src = currentFloor();
@@ -878,6 +1184,7 @@ export function createEditor(root) {
         name: `${src.name} (Kopie)`,
         height: src.height,
         rooms: src.rooms.map((r) => cloneRoom(r)),
+        ...(src.underlay ? { underlay: { ...src.underlay } } : {}),
       });
       store.mutate((b) => b.floors.splice(idx + 1, 0, copy));
       setFloor(copy.id);
@@ -889,7 +1196,11 @@ export function createEditor(root) {
       if (floors().length <= 1) return;
       if (!confirm(`Etage „${floor.name}“ mit ${floor.rooms.length} Räumen löschen?`)) return;
       const idx = floors().indexOf(floor);
-      store.mutate((b) => b.floors.splice(idx, 1));
+      store.mutate((b) => {
+        b.floors.splice(idx, 1);
+        // Erdgeschoss gelöscht: die Etage darüber (sonst darunter) liegt jetzt auf Geländehöhe
+        if (b.groundFloorId === floor.id) b.groundFloorId = (b.floors[idx] ?? b.floors[idx - 1]).id;
+      });
       setFloor(floors()[Math.max(0, idx - 1)].id);
     },
     'tool-select': () => setTool('select'),
@@ -899,6 +1210,24 @@ export function createEditor(root) {
       store.mutate((b) => {
         const r = roomById(b, state.selectedRoomId);
         r.stairDir = rotateStairDir(r.stairDir);
+      });
+    },
+    'room-shape': (btn) => {
+      const shape = btn.dataset.shape;
+      store.mutate((b) => {
+        const r = roomById(b, state.selectedRoomId);
+        if (roomShape(r) === 'rect' && shape !== 'rect') Object.assign(r, defaultCut(r));
+        r.shape = shape;
+        clampCut(r);
+        clampItems(r);
+      });
+    },
+    'cut-rotate': () => {
+      const order = Object.keys(CUT_CORNERS);
+      store.mutate((b) => {
+        const r = roomById(b, state.selectedRoomId);
+        r.cutCorner = order[(order.indexOf(r.cutCorner) + 1) % order.length];
+        clampItems(r);
       });
     },
     'tool-tank': () => setTool('tank'),
@@ -971,12 +1300,12 @@ export function createEditor(root) {
     standard: async () => {
       if (!store.matchesStandard && !confirm('Entwurf verwerfen und den Standard laden? (Rückgängig ist möglich)')) return;
       await store.discardDraft();
-      setFloor(floors()[0].id, { fit: true });
+      setFloor(store.building.groundFloorId, { fit: true });
     },
     reset: () => {
       if (!confirm('Aktuelles Gebäude durch das Testgebäude ersetzen? (Rückgängig ist möglich)')) return;
       store.replace(createSampleBuilding());
-      setFloor(floors()[0].id, { fit: true });
+      setFloor(store.building.groundFloorId, { fit: true });
     },
     'zoom-in': () => zoomAt(1.25),
     'zoom-out': () => zoomAt(0.8),
@@ -1010,13 +1339,23 @@ export function createEditor(root) {
     if (btn) select(btn.dataset.room);
   });
 
+  $('#e-underlay-file').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (file) loadUnderlay(file);
+  });
+  // Deckkraft beim Ziehen des Reglers sofort zeigen, gespeichert wird beim Loslassen
+  $('#e-props').addEventListener('input', (e) => {
+    if (e.target.dataset.bind === 'underlay:opacity') underlayEl.setAttribute('opacity', e.target.value);
+  });
+
   $('#e-file').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     e.target.value = '';
     if (!file) return;
     try {
       store.replace(JSON.parse(await file.text()));
-      setFloor(floors()[0].id, { fit: true });
+      setFloor(store.building.groundFloorId, { fit: true });
     } catch (err) {
       alert(`Import fehlgeschlagen: ${err.message}`);
     }
@@ -1026,7 +1365,7 @@ export function createEditor(root) {
     const el = e.target.closest('[data-bind]');
     if (!el) return;
     const [scope, key, field] = el.dataset.bind.split(':');
-    let value = el.value;
+    let value = el.type === 'checkbox' ? el.checked : el.value;
 
     if (scope === 'port') {
       changeSource = source;
@@ -1042,15 +1381,15 @@ export function createEditor(root) {
       });
       return;
     }
-    if (['x', 'z', 'width', 'depth', 'height'].includes(key)) {
+    if (['x', 'z', 'width', 'depth', 'height', 'cutW', 'cutD', 'opacity'].includes(key)) {
       value = parseFloat(String(value).replace(',', '.'));
       if (!Number.isFinite(value)) return renderProps();
       if (key === 'width' || key === 'depth') value = Math.max(0.5, value);
       if (key === 'height') value = clamp(value, 2, 10);
       value = round2(value);
     }
-    // Typwechsel ändert die Farbe → Formular neu zeichnen
-    changeSource = key !== 'type' ? source : null;
+    // Typwechsel ändert die Farbe, Treppenform/Aufzug den Hinweis → Formular neu zeichnen
+    changeSource = ['type', 'elevator', 'stairShape'].includes(key) ? null : source;
     if (scope === 'printer') value = value.trim();
     store.mutate((b) => {
       const target =
@@ -1060,13 +1399,16 @@ export function createEditor(root) {
             ? printerById(b)
             : scope === 'room'
             ? roomById(b, state.selectedRoomId)
+            : scope === 'underlay'
+            ? b.floors.find((f) => f.id === state.floorId)?.underlay
             : scope === 'floor'
               ? b.floors.find((f) => f.id === state.floorId)
               : b;
       if (!target) return;
       target[key] = value;
       const room = roomById(b, state.selectedRoomId);
-      if (room && (scope === 'tank' || key === 'width' || key === 'depth')) clampItems(room);
+      if (scope === 'room' && ['width', 'depth', 'cutW', 'cutD'].includes(key)) clampCut(room);
+      if (room && (scope === 'tank' || ['width', 'depth', 'cutW', 'cutD', 'cutCorner'].includes(key))) clampItems(room);
     });
     changeSource = null;
     if (scope === 'printer' && key === 'ip') {
@@ -1106,6 +1448,21 @@ export function createEditor(root) {
     }
     if (e.button !== 0) return;
 
+    if (state.tool === 'calibrate') {
+      if (!calib || calib.b) calib = { a: [w.x, w.z], b: null, hover: [w.x, w.z] };
+      else {
+        calib.b = [w.x, w.z];
+        finishCalibration();
+        return;
+      }
+      renderPlan();
+      return;
+    }
+    if (state.tool === 'underlay') {
+      const u = currentFloor().underlay;
+      if (u) drag = { type: 'underlay', start: w, orig: { x: u.x, z: u.z }, started: false };
+      return;
+    }
     if (state.tool === 'draw' || state.tool === 'stairs') {
       const p = { x: snapValue(w.x, e.altKey), z: snapValue(w.z, e.altKey) };
       drag = { type: 'draw', start: p };
@@ -1180,6 +1537,10 @@ export function createEditor(root) {
   svg.addEventListener('pointermove', (e) => {
     const w = toWorld(e);
     $('#e-coords').textContent = `x ${fmt(w.x, 2)} · z ${fmt(w.z, 2)} m`;
+    if (calib && !calib.b) {
+      calib.hover = [w.x, w.z];
+      renderPlan();
+    }
     if (!drag) return;
 
     if (drag.type === 'pan') {
@@ -1211,6 +1572,12 @@ export function createEditor(root) {
     const free = e.altKey;
     store.mutate(
       (b) => {
+        if (drag.type === 'underlay') {
+          const u = b.floors.find((f) => f.id === state.floorId).underlay;
+          u.x = round2(drag.orig.x + dx);
+          u.z = round2(drag.orig.z + dz);
+          return;
+        }
         const r = roomById(b, state.selectedRoomId);
         if (!r) return;
         if (drag.type === 'tank' || drag.type === 'printer') {
@@ -1227,6 +1594,16 @@ export function createEditor(root) {
         }
         const o = drag.orig;
         const h = drag.handle;
+        if (h === 'cut') {
+          const { corner, east, north } = cutHandle(r);
+          const px = snapValue(w.x, free);
+          const pz = snapValue(w.z, free);
+          r.cutW = round2(east ? corner[0] - px : px - corner[0]);
+          r.cutD = round2(north ? pz - corner[1] : corner[1] - pz);
+          clampCut(r);
+          clampItems(r);
+          return;
+        }
         if (h.includes('w')) {
           const x = Math.min(snapValue(o.x + dx, free), o.x + o.width - MIN_SIZE);
           r.x = round2(x);
@@ -1239,6 +1616,7 @@ export function createEditor(root) {
           r.depth = round2(o.z + o.depth - z);
         }
         if (h.includes('s')) r.depth = round2(Math.max(MIN_SIZE, snapValue(o.z + o.depth + dz, free) - o.z));
+        clampCut(r);
         // Bodentanks und Drucker bleiben beim Ändern der Raumgröße an ihrer Stelle im Gebäude
         r.tanks.forEach((t, i) => {
           t.x = o.tanks[i].x + (o.x - r.x);
@@ -1303,6 +1681,7 @@ export function createEditor(root) {
     else if (key === 'enter' && state.selectedTankId) openTankModal();
     else if (key === 'escape') {
       draftRect = null;
+      calib = null;
       drag = null;
       setTool('select');
       if (state.selectedTankId || state.selectedPrinterId) select(state.selectedRoomId, null);
@@ -1333,6 +1712,7 @@ export function createEditor(root) {
     renderPlan();
     renderRoomList();
     if (changeSource !== 'props') renderProps();
+    else updateAreas();
     if (changeSource !== 'modal') renderTankModal();
   });
 

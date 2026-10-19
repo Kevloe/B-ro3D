@@ -2,10 +2,11 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { roomColor } from '../data/roomTypes.js';
-import { floorBounds, PRINTER_D, PRINTER_W, TANK_SIZE } from '../data/model.js';
-import { computeWalls, WALL_THICKNESS } from './walls.js';
+import { floorBounds, groundIndex, PRINTER_D, PRINTER_W, TANK_SIZE } from '../data/model.js';
+import { computeWalls } from './walls.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { stairLayout, subtractRects } from '../data/stairs.js';
+import { clipConvex, roomLabelPoint, roomPieces, roomPolygon } from '../data/shape.js';
 import { esc } from '../utils.js';
 
 const SLAB_T = 0.2;
@@ -20,6 +21,36 @@ function rectsGeometry(rects, h) {
     return g.translate(r.x + r.w / 2, 0, r.z + r.d / 2);
   });
   if (!geos.length) return new THREE.PlaneGeometry(0, 0);
+  if (geos.length === 1) return geos[0];
+  const merged = mergeGeometries(geos);
+  geos.forEach((g) => g.dispose());
+  return merged;
+}
+
+/** Umriss ([[x, z], …]) als THREE.Shape; die Form liegt in der x/y-Ebene mit y = -z. */
+const toShape = (poly) => new THREE.Shape(poly.map(([x, z]) => new THREE.Vector2(x, -z)));
+
+/** Umriss als Prisma der Höhe `h` ab y = 0. */
+function prismGeometry(poly, h) {
+  return new THREE.ExtrudeGeometry(toShape(poly), { depth: h, bevelEnabled: false }).rotateX(-Math.PI / 2);
+}
+
+/** Boden eines Raums ohne Deckenöffnungen: jedes konvexe Teil minus Öffnungen, auf das Teil zugeschnitten. */
+function roomFloorGeometry(room, openings) {
+  const polys = [];
+  for (const piece of roomPieces(room)) {
+    const xs = piece.map((p) => p[0]);
+    const zs = piece.map((p) => p[1]);
+    const box = { x: Math.min(...xs), z: Math.min(...zs) };
+    box.w = Math.max(...xs) - box.x;
+    box.d = Math.max(...zs) - box.z;
+    for (const r of subtractRects(box, openings)) {
+      const poly = clipConvex([[r.x, r.z], [r.x + r.w, r.z], [r.x + r.w, r.z + r.d], [r.x, r.z + r.d]], piece);
+      if (poly) polys.push(poly);
+    }
+  }
+  if (!polys.length) return new THREE.PlaneGeometry(0, 0);
+  const geos = polys.map((poly) => new THREE.ShapeGeometry(toShape(poly)).rotateX(-Math.PI / 2));
   if (geos.length === 1) return geos[0];
   const merged = mergeGeometries(geos);
   geos.forEach((g) => g.dispose());
@@ -99,7 +130,7 @@ export class BuildingView {
 
     this.ground = new THREE.Mesh(
       new THREE.PlaneGeometry(1000, 1000),
-      new THREE.MeshStandardMaterial({ color: 0xdfe3e9, roughness: 1 }),
+      new THREE.MeshStandardMaterial({ color: 0xdfe3e9, roughness: 1, opacity: 0.55 }),
     );
     this.ground.rotation.x = -Math.PI / 2;
     this.ground.position.y = -SLAB_T - 0.01;
@@ -129,7 +160,9 @@ export class BuildingView {
     this.building = building;
     this.clear();
 
-    let elevation = 0;
+    // Erdgeschoss auf Höhe 0, Untergeschosse darunter
+    const ground = groundIndex(building);
+    let elevation = -building.floors.slice(0, ground).reduce((sum, f) => sum + f.height, 0);
     building.floors.forEach((floor, index) => {
       const below = building.floors[index - 1];
       const context = {
@@ -141,7 +174,7 @@ export class BuildingView {
       };
       const group = this.buildFloor(floor, context);
       group.userData.elevation = elevation;
-      group.userData.index = index;
+      group.userData.index = index - ground;
       this.floors.set(floor.id, group);
       this.buildingGroup.add(group);
       elevation += floor.height;
@@ -213,7 +246,11 @@ export class BuildingView {
       box.expandByPoint(new THREE.Vector3(bounds.minX, group.position.y, bounds.minZ));
       box.expandByPoint(new THREE.Vector3(bounds.maxX, group.position.y + height, bounds.maxZ));
     }
-    if (box.isEmpty()) box.set(new THREE.Vector3(-5, 0, -5), new THREE.Vector3(5, 3, 5));
+    if (box.isEmpty()) {
+      // leere Etage: auf ihre Höhe schauen (Untergeschosse liegen unter 0)
+      const y = this.floors.get(this.focusFloorId)?.position.y ?? 0;
+      box.set(new THREE.Vector3(-5, y, -5), new THREE.Vector3(5, y + 3, 5));
+    }
 
     const center = box.getCenter(new THREE.Vector3());
     const radius = box.getSize(new THREE.Vector3()).length() / 2;
@@ -281,16 +318,11 @@ export class BuildingView {
     }
 
     for (const room of floor.rooms) {
-      const floorRect = {
-        x: room.x + 0.01,
-        z: room.z + 0.01,
-        w: Math.max(room.width - 0.02, 0.01),
-        d: Math.max(room.depth - 0.02, 0.01),
-      };
-      const geo = rectsGeometry(subtractRects(floorRect, openings), 0);
-      geo.translate(-(room.x + room.width / 2), 0, -(room.z + room.depth / 2));
-      const mesh = new THREE.Mesh(geo, material({ color: roomColor(room), roughness: 0.85 }));
-      mesh.position.set(room.x + room.width / 2, 0.01, room.z + room.depth / 2);
+      const mesh = new THREE.Mesh(
+        roomFloorGeometry(room, openings),
+        material({ color: roomColor(room), roughness: 0.85 }),
+      );
+      mesh.position.y = 0.01;
       mesh.receiveShadow = true;
       mesh.userData = { roomId: room.id, floorId: floor.id };
       group.add(mesh);
@@ -301,13 +333,15 @@ export class BuildingView {
         `<span class="rl-name">${esc(room.name)}</span>` +
         (room.occupant ? `<span class="rl-sub">${esc(room.occupant)}</span>` : '');
       const label = new CSS2DObject(el);
-      label.position.set(mesh.position.x, 1.2, mesh.position.z);
+      const [lx, lz] = roomLabelPoint(room);
+      label.position.set(lx, 1.2, lz);
       group.add(label);
       labels.push(label);
 
       this.rooms.set(room.id, { mesh, label, floorId: floor.id, room });
 
       if (room.type === 'stairs' && hasFloorAbove) stairTops.push(...this.buildStairs(group, room, floor, material, wallH));
+      if (room.type === 'stairs') this.buildElevator(group, room, floor, material, wallH);
 
       for (const tank of room.tanks) {
         const tx = room.x + tank.x;
@@ -383,19 +417,11 @@ export class BuildingView {
 
     const wallMat = material({ color: 0xfbfbf9, roughness: 0.7 });
     for (const seg of computeWalls(floor.rooms)) {
-      const len = seg.b - seg.a;
-      if (len < 0.01) continue;
+      if (seg.len < 0.01) continue;
       if (seg.kind === 'lintel' && (low || wallH <= DOOR_H + 0.05)) continue;
       const h = seg.kind === 'wall' ? wallH : wallH - DOOR_H;
-      const y = seg.kind === 'wall' ? h / 2 : DOOR_H + h / 2;
-      const mid = (seg.a + seg.b) / 2;
-      const geo =
-        seg.axis === 'x'
-          ? new THREE.BoxGeometry(len, h, WALL_THICKNESS)
-          : new THREE.BoxGeometry(WALL_THICKNESS, h, len);
-      const wall = new THREE.Mesh(geo, wallMat);
-      if (seg.axis === 'x') wall.position.set(mid, y, seg.pos);
-      else wall.position.set(seg.pos, y, mid);
+      const wall = new THREE.Mesh(prismGeometry(seg.quad, h), wallMat);
+      wall.position.y = seg.kind === 'wall' ? 0 : DOOR_H;
       wall.castShadow = true;
       wall.receiveShadow = true;
       group.add(wall);
@@ -427,6 +453,30 @@ export class BuildingView {
     return tops;
   }
 
+  /** Aufzugsschacht im Treppenauge mit geschlossener Tür zum Geschosspodest (auch auf der obersten Etage). */
+  buildElevator(group, room, floor, material, wallH) {
+    const lift = stairLayout(room, floor.height).elevator;
+    if (!lift) return;
+    const shaft = new THREE.Mesh(rectsGeometry(lift.walls, wallH), material({ color: 0xd9dde2, roughness: 0.8 }));
+    const doorH = Math.min(DOOR_H, wallH);
+    const door = new THREE.Mesh(
+      rectsGeometry([lift.door], doorH),
+      material({ color: 0x9aa3ad, roughness: 0.3, metalness: 0.7 }),
+    );
+    shaft.position.y = wallH / 2;
+    door.position.y = doorH / 2;
+    for (const m of [shaft, door]) {
+      m.castShadow = true;
+      m.receiveShadow = true;
+      group.add(m);
+    }
+    if (wallH > doorH + 0.01) {
+      const lintel = new THREE.Mesh(rectsGeometry([lift.door], wallH - doorH), shaft.material);
+      lintel.position.y = doorH + (wallH - doorH) / 2;
+      group.add(lintel);
+    }
+  }
+
   clear() {
     this.clearSelection();
     for (const group of this.floors.values()) {
@@ -448,6 +498,7 @@ export class BuildingView {
       group.position.y = group.userData.elevation + group.userData.index * this.options.explode;
     }
     this.fitShadow();
+    this.applyGround();
   }
 
   applyFocus() {
@@ -473,10 +524,30 @@ export class BuildingView {
         label.visible = state === 'full' && this.options.labels;
       }
     });
+    this.applyGround();
     floors.forEach((floor, i) => {
       const above = floors[i + 1] && this.floors.get(floors[i + 1].id);
       for (const mesh of this.floors.get(floor.id)?.userData.stairTops ?? []) mesh.visible = Boolean(above?.visible);
     });
+  }
+
+  /**
+   * Gelände: Ist ein Untergeschoss gewählt, liegt der Boden unter diesem Geschoss.
+   * Sonst auf Höhe des Erdgeschosses und – wenn Untergeschosse zu sehen sind – durchscheinend.
+   */
+  applyGround() {
+    if (!this.building) return;
+    const groups = this.building.floors.map((f) => this.floors.get(f.id)).filter(Boolean);
+    const focus = groups.find((g) => g.userData.floorId === this.focusFloorId);
+    const basement = focus && focus.userData.index < 0;
+    const y = basement ? focus.position.y - SLAB_T - 0.01 : -SLAB_T - 0.01;
+    const seeThrough = !basement && groups.some((g) => g.userData.index < 0 && g.visible);
+    this.ground.position.y = y;
+    this.grid.position.y = y + 0.005;
+    const m = this.ground.material;
+    if (m.transparent !== seeThrough) m.needsUpdate = true;
+    m.transparent = seeThrough;
+    m.depthWrite = !seeThrough;
   }
 
   applyHighlight() {
@@ -533,7 +604,7 @@ export class BuildingView {
     if (group.userData.state !== 'full') return;
     const r = info.room;
     const h = group.userData.height - SLAB_T;
-    const geo = new THREE.BoxGeometry(r.width, h, r.depth);
+    const geo = prismGeometry(roomPolygon(r), h);
     const fill = new THREE.Mesh(
       geo,
       new THREE.MeshBasicMaterial({ color: ACCENT, transparent: true, opacity: 0.1, depthWrite: false }),
@@ -544,7 +615,7 @@ export class BuildingView {
     );
     const sel = new THREE.Group();
     sel.add(fill, edges);
-    sel.position.set(r.x + r.width / 2, h / 2 + 0.02, r.z + r.depth / 2);
+    sel.position.y = 0.02;
     group.add(sel);
     this.selectionObj = sel;
   }

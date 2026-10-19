@@ -2,7 +2,8 @@ import { store } from '../data/store.js';
 import { findPrinter, findRoom, findTank, isValidIp, tankPortCount } from '../data/model.js';
 import { groupPortsByPanel, switchLabel } from '../data/ports.js';
 import { roomColor, roomTypeLabel } from '../data/roomTypes.js';
-import { STAIR_SHAPES } from '../data/stairs.js';
+import { elevatorFits, STAIR_SHAPES } from '../data/stairs.js';
+import { ROOM_SHAPES, roomArea, roomShape } from '../data/shape.js';
 import { BuildingView } from '../three/BuildingView.js';
 import { esc, fmt } from '../utils.js';
 
@@ -54,6 +55,7 @@ export function createViewer(root) {
   view.setBuilding(store.building);
 
   const floorsTopDown = () => [...store.building.floors].reverse();
+  const areaText = (v) => `${fmt(v, 2)} m²`;
   const listedRooms = (floor) =>
     floor.rooms.filter((r) => r.type !== 'corridor' || r.printers.length || r.tanks.length);
 
@@ -65,7 +67,9 @@ export function createViewer(root) {
       </button>`;
     $('#v-floors').innerHTML = [
       btn(null, 'Alle Etagen', `${floors.length}`),
-      ...floorsTopDown().map((f) => btn(f.id, f.name, `${listedRooms(f).length} Räume`)),
+      ...floorsTopDown().map((f) =>
+        btn(f.id, f.name, `${listedRooms(f).length} Räume · ${fmt(f.rooms.reduce((n, r) => n + roomArea(r), 0), 0)} m²`),
+      ),
     ].join('');
   }
 
@@ -73,7 +77,7 @@ export function createViewer(root) {
     const q = state.query.trim().toLowerCase();
     const matches = (r) =>
       !q ||
-      [r.name, r.occupant, r.description, roomTypeLabel(r), ...r.tanks.flatMap((t) => [t.name, ...t.ports.flatMap((p) => [p.name, p.switch])]), ...r.printers.flatMap((p) => [p.name, p.ip])]
+      [r.name, r.occupant, r.description, roomTypeLabel(r), elevatorFits(r) ? 'Aufzug' : '', ...r.tanks.flatMap((t) => [t.name, ...t.ports.flatMap((p) => [p.name, p.switch])]), ...r.printers.flatMap((p) => [p.name, p.ip])]
         .some((s) => s?.toLowerCase().includes(q));
 
     const groups = floorsTopDown()
@@ -99,7 +103,7 @@ export function createViewer(root) {
               <span class="swatch" style="background:${roomColor(r)}"></span>
               <span class="ri-text">
                 <span class="ri-name">${esc(r.name)}</span>
-                ${r.occupant ? `<span class="ri-sub">${esc(r.occupant)}</span>` : ''}
+                <span class="ri-sub">${[r.occupant, areaText(roomArea(r))].filter(Boolean).map(esc).join(' · ')}</span>
               </span>
               ${r.printers.length ? `<span class="ri-meta" title="Drucker">${r.printers.length} DR</span>` : ''}
               ${r.tanks.length ? `<span class="ri-meta" title="Bodentanks">${r.tanks.length} BT</span>` : ''}
@@ -131,8 +135,10 @@ export function createViewer(root) {
             ${detail('Nutzer / Team', esc(room.occupant))}
             ${detail('Raumtyp', esc(roomTypeLabel(room)))}
             ${detail('Etage', esc(floor.name))}
-            ${detail('Maße', `${fmt(room.width)} × ${fmt(room.depth)} m`)}
+            ${detail('Fläche', areaText(roomArea(room)))}
+            ${detail('Maße', `${fmt(room.width)} × ${fmt(room.depth)} m${roomShape(room) === 'rect' ? '' : ` · ${ROOM_SHAPES[roomShape(room)]}`}`)}
             ${detail('Treppe', room.type === 'stairs' ? esc(STAIR_SHAPES[room.stairShape]) : '')}
+            ${detail('Aufzug', room.type === 'stairs' && elevatorFits(room) ? 'ja' : '')}
             ${detail('Bodentanks', room.tanks.length ? `${room.tanks.length} · ${total} Ports · ${patched} gepatcht` : '')}
             ${detail('Drucker', room.printers.length ? String(room.printers.length) : '')}
           </dl>

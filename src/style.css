@@ -308,15 +308,22 @@ a.btn { text-decoration: none; color: inherit; }
 }
 
 /* SVG plan */
-.room rect { stroke: #4a5363; cursor: move; }
-.room.selected rect { stroke: var(--accent); }
-.room.overlap rect { stroke: var(--accent); stroke-dasharray: 0.3 0.2; }
+.room .room-shape { stroke: #4a5363; cursor: move; }
+.room.selected .room-shape { stroke: var(--accent); }
+.room.overlap .room-shape { stroke: var(--accent); stroke-dasharray: 0.3 0.2; }
 .room text { pointer-events: none; text-anchor: middle; dominant-baseline: middle; fill: var(--text); }
 .room .room-name { font-weight: 600; }
-.plan-wrap[data-tool='draw'] .room rect,
-.plan-wrap[data-tool='stairs'] .room rect,
-.plan-wrap[data-tool='tank'] .room rect { cursor: crosshair; }
+.room .room-area { fill: var(--muted); }
+.plan-wrap[data-tool='draw'] .room .room-shape,
+.plan-wrap[data-tool='stairs'] .room .room-shape,
+.plan-wrap[data-tool='tank'] .room .room-shape { cursor: crosshair; }
 .room .stair { pointer-events: none; }
+.room .lift { pointer-events: none; }
+.room .lift .lift-shaft { fill: #f4f5f7; stroke: #3b4352; }
+.room .lift .lift-cross { stroke: #8a929d; }
+.room .lift .lift-walls rect { fill: #4a5363; stroke: none; }
+.room .lift .lift-door { fill: #c3c9d1; stroke: #3b4352; }
+.room .lift text { fill: #3b4352; font-weight: 600; }
 .room .stair rect { fill: none; stroke: #6b7482; }
 .room .stair circle { fill: #3b4352; }
 .room .stair .stair-arrow { fill: none; stroke: #3b4352; stroke-linejoin: round; stroke-linecap: round; }
@@ -327,9 +334,18 @@ a.btn { text-decoration: none; color: inherit; }
 .tank.selected text { fill: var(--accent); }
 .plan-wrap[data-tool='tank'] .tank rect { cursor: crosshair; }
 .ref-room { fill: none; stroke: #9aa3b0; }
+.underlay { pointer-events: none; mix-blend-mode: multiply; }
+.plan-wrap[data-tool='underlay'] svg { cursor: move; }
+.plan-wrap[data-tool='calibrate'] svg,
+.plan-wrap[data-tool='calibrate'] .room .room-shape { cursor: crosshair; }
+.calib path { stroke: var(--accent); }
+.calib circle { fill: #fff; stroke: var(--accent); }
+.underlay-fields .btn-row { margin-top: 2px; }
 .draft { fill: rgba(226, 0, 26, 0.08); stroke: var(--accent); }
 .dim { fill: var(--accent); font-weight: 600; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
 .handle { fill: #fff; stroke: var(--accent); }
+.handle-cut { fill: var(--accent); stroke: #fff; cursor: move; }
+.cut-guide { fill: none; stroke: var(--accent); pointer-events: none; }
 .h-nw, .h-se { cursor: nwse-resize; }
 .h-ne, .h-sw { cursor: nesw-resize; }
 .h-n, .h-s { cursor: ns-resize; }
@@ -339,6 +355,11 @@ a.btn { text-decoration: none; color: inherit; }
 .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 .field > span { color: var(--muted); font-weight: 600; }
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.seg-fill { display: flex; }
+.seg-fill .btn { flex: 1; padding-left: 4px; padding-right: 4px; }
+.seg-fill .btn + .btn { margin-left: -1px; }
+.area-row { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; color: var(--muted); }
+.area-row strong { color: var(--text); font-size: 14px; }
 .color-row { display: flex; align-items: center; gap: 8px; }
 .color-row input[type='color'] { width: 44px; height: 30px; padding: 2px; border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; cursor: pointer; }
 .stat { font-size: 13px; color: var(--muted); }
@@ -643,7 +664,7 @@ a.btn { text-decoration: none; }
 .printer.selected rect:not(.paper) { fill: var(--accent); stroke: #8f0011; }
 .printer.selected text { fill: var(--accent); }
 .plan-wrap[data-tool='printer'] svg,
-.plan-wrap[data-tool='printer'] .room rect,
+.plan-wrap[data-tool='printer'] .room .room-shape,
 .plan-wrap[data-tool='printer'] .tank rect,
 .plan-wrap[data-tool='printer'] .printer rect { cursor: crosshair; }
 .panel-printer { background: #f4f7fc; }

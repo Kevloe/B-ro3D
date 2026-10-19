@@ -21,6 +21,26 @@ const RISER = 0.18; // angestrebte Stufenhöhe
 const EYE = 0.15; // Treppenauge zwischen den Läufen
 const EDGE = 0.15; // Abstand des Pfeils zu den Enden
 
+// Aufzug im Treppenauge (nur zweiläufig): Schacht zwischen den Läufen, Tür zum Geschosspodest
+const SHAFT_MIN = 1.1; // Schachtbreite quer zur Laufrichtung
+const SHAFT_MAX = 1.8;
+const SHAFT_DEPTH = 1.8; // Schachttiefe entlang der Laufrichtung (höchstens)
+const SHAFT_GAP = 0.1; // Abstand Schacht – Lauf
+export const SHAFT_WALL = 0.12;
+export const LIFT_DOOR = 0.9;
+const MIN_FLIGHT = 0.8; // Laufbreite, die neben dem Schacht mindestens bleiben muss
+
+/** Mindestbreite (innen, quer zur Laufrichtung) für ein Treppenhaus mit Aufzug. */
+export const ELEVATOR_MIN_WIDTH = 2 * MIN_FLIGHT + SHAFT_MIN + 2 * SHAFT_GAP;
+
+/** Hat das Treppenhaus einen Aufzug, der auch hineinpasst? */
+export function elevatorFits(room) {
+  if (!room.elevator || room.stairShape === 'straight') return false;
+  const alongZ = room.stairDir === 'n' || room.stairDir === 's';
+  const W = (alongZ ? room.width : room.depth) - WALL_THICKNESS * 2;
+  return W >= ELEVATOR_MIN_WIDTH - 1e-6;
+}
+
 /**
  * Stufen und Podeste eines Treppenhauses in Weltkoordinaten (achsparallele Rechtecke).
  * Gerechnet wird lokal innerhalb der Wände: u quer zur Laufrichtung (0..W), v entlang der
@@ -66,6 +86,7 @@ export function stairLayout(room, height) {
   const landings = [];
   let path;
   let opening;
+  let elevator = null;
 
   if (room.stairShape === 'straight') {
     const exitD = Math.min(1, D * 0.2); // Austritt oben bleibt Boden der nächsten Etage
@@ -75,7 +96,10 @@ export function stairLayout(room, height) {
     path = [[W / 2, EDGE], [W / 2, run + exitD / 2]];
     opening = rect(0, 0, W, run);
   } else {
-    const fw = Math.max(0.3, (W - EYE) / 2); // Laufbreite
+    const lift = elevatorFits(room);
+    const shaftW = lift ? Math.min(SHAFT_MAX, W - 2 * MIN_FLIGHT - 2 * SHAFT_GAP) : 0;
+    const eye = lift ? shaftW + 2 * SHAFT_GAP : EYE;
+    const fw = Math.max(0.3, (W - eye) / 2); // Laufbreite
     const landingD = Math.min(Math.max(fw, 0.8), D * 0.3);
     const run = D - landingD * 2;
     const n1 = Math.ceil(risers / 2);
@@ -90,10 +114,31 @@ export function stairLayout(room, height) {
     const mid = D - landingD / 2;
     path = [[fw / 2, landingD / 2], [fw / 2, mid], [W - fw / 2, mid], [W - fw / 2, landingD / 2]];
     opening = rect(0, landingD, W, D - landingD);
+
+    if (lift) {
+      // Schacht direkt am Geschosspodest, Tür zeigt zum Podest (v = landingD)
+      const u0 = fw + SHAFT_GAP;
+      const v0 = landingD;
+      const sd = Math.min(SHAFT_DEPTH, run);
+      const t = SHAFT_WALL;
+      const side = (shaftW - LIFT_DOOR) / 2;
+      elevator = {
+        shaft: rect(u0, v0, shaftW, sd),
+        walls: [
+          rect(u0, v0 + sd - t, shaftW, t), // Rückwand
+          rect(u0, v0 + t, t, sd - 2 * t), // Seiten
+          rect(u0 + shaftW - t, v0 + t, t, sd - 2 * t),
+          rect(u0, v0, side, t), // Front links und rechts der Tür
+          rect(u0 + shaftW - side, v0, side, t),
+        ],
+        door: rect(u0 + side, v0, LIFT_DOOR, t),
+      };
+      for (const r of [elevator.shaft, ...elevator.walls, elevator.door]) delete r.top;
+    }
   }
 
   delete opening.top;
-  return { steps, landings, opening, path: path.map(([u, v]) => toWorld(u, v)) };
+  return { steps, landings, opening, elevator, path: path.map(([u, v]) => toWorld(u, v)) };
 }
 
 const EPS = 1e-4;

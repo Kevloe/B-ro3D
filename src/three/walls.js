@@ -1,18 +1,33 @@
+import { roomPolygon } from '../data/shape.js';
+
 export const WALL_THICKNESS = 0.12;
 
 const EPS = 1e-3;
 
 /**
- * Edges of a room rectangle. `side` points to the outside of the room
- * (-1 = towards smaller coordinate, +1 = towards larger coordinate).
+ * Kanten des Raumumrisses: Startpunkt, Richtung `u` (Einheitsvektor), Länge und die
+ * nach innen zeigende Normale `n`.
  */
-function edgesOf(r) {
-  return [
-    { axis: 'x', fixed: r.z, a: r.x, b: r.x + r.width, side: -1 },
-    { axis: 'x', fixed: r.z + r.depth, a: r.x, b: r.x + r.width, side: 1 },
-    { axis: 'z', fixed: r.x, a: r.z, b: r.z + r.depth, side: -1 },
-    { axis: 'z', fixed: r.x + r.width, a: r.z, b: r.z + r.depth, side: 1 },
-  ];
+function edgesOf(poly) {
+  return poly.map((p, i) => {
+    const q = poly[(i + 1) % poly.length];
+    const len = Math.hypot(q[0] - p[0], q[1] - p[1]) || 1;
+    const u = [(q[0] - p[0]) / len, (q[1] - p[1]) / len];
+    return { p, len, u, n: [-u[1], u[0]] };
+  });
+}
+
+/** Abschnitt [a, b] einer Kante, auf dem `e2` deckungsgleich, aber gegenläufig verläuft (Nachbarraum). */
+function sharedRange(e, e2) {
+  if (e.u[0] * e2.u[0] + e.u[1] * e2.u[1] > -1 + 1e-6) return null;
+  const dist = (e2.p[0] - e.p[0]) * e.n[0] + (e2.p[1] - e.p[1]) * e.n[1];
+  if (Math.abs(dist) > EPS) return null;
+  const along = (pt) => (pt[0] - e.p[0]) * e.u[0] + (pt[1] - e.p[1]) * e.u[1];
+  const t1 = along(e2.p);
+  const t2 = t1 - e2.len;
+  const a = Math.max(0, Math.min(t1, t2));
+  const b = Math.min(e.len, Math.max(t1, t2));
+  return b - a > EPS ? [a, b] : null;
 }
 
 function subtract(intervals, cuts) {
@@ -37,28 +52,36 @@ function subtract(intervals, cuts) {
  * - Each room gets walls inset on its own side, so neighbouring rooms never overlap.
  * - Corridors have no wall where they touch other rooms (the room wall is used).
  * - Rooms touching a corridor get a door opening (with lintel) in the middle of the shared edge.
+ * - Edges may run at any angle (slanted walls); corners are mitred.
  *
- * Returns segments `{ axis, pos, a, b, kind: 'wall' | 'lintel' }` where `pos` is the
- * wall centre line on the fixed axis and `a..b` the extent along `axis`.
+ * Returns segments `{ quad: [[x, z] × 4], len, kind: 'wall' | 'lintel' }` – `quad` is the wall's
+ * footprint (outer edge, then inner edge backwards).
  */
 export function computeWalls(rooms, doorWidth = 1) {
   const out = [];
   const isCorridor = (r) => r.type === 'corridor';
+  const all = rooms.map((room) => ({ room, edges: edgesOf(roomPolygon(room)) }));
+  const T = WALL_THICKNESS;
 
-  for (const room of rooms) {
-    for (const edge of edgesOf(room)) {
+  for (const { room, edges } of all) {
+    // Innenecken: Schnittpunkt der um T nach innen versetzten Nachbarkanten (Gehrung)
+    const inner = edges.map((e, i) => {
+      const prev = edges[(i + edges.length - 1) % edges.length];
+      const k = T / (1 + prev.n[0] * e.n[0] + prev.n[1] * e.n[1]);
+      return [e.p[0] + (prev.n[0] + e.n[0]) * k, e.p[1] + (prev.n[1] + e.n[1]) * k];
+    });
+
+    edges.forEach((edge, i) => {
       const overlaps = [];
-      for (const other of rooms) {
-        if (other === room) continue;
-        for (const e2 of edgesOf(other)) {
-          if (e2.axis !== edge.axis || e2.side !== -edge.side || Math.abs(e2.fixed - edge.fixed) > EPS) continue;
-          const a = Math.max(edge.a, e2.a);
-          const b = Math.min(edge.b, e2.b);
-          if (b - a > EPS) overlaps.push({ a, b, corridor: isCorridor(other) });
+      for (const other of all) {
+        if (other.room === room) continue;
+        for (const e2 of other.edges) {
+          const range = sharedRange(edge, e2);
+          if (range) overlaps.push({ a: range[0], b: range[1], corridor: isCorridor(other.room) });
         }
       }
 
-      let segments = [[edge.a, edge.b]];
+      let segments = [[0, edge.len]];
       let lintels = [];
       if (isCorridor(room)) {
         segments = subtract(segments, overlaps.map((o) => [o.a, o.b]));
@@ -72,10 +95,17 @@ export function computeWalls(rooms, doorWidth = 1) {
         segments = subtract(segments, lintels);
       }
 
-      const pos = edge.fixed - (edge.side * WALL_THICKNESS) / 2;
-      for (const [a, b] of segments) out.push({ axis: edge.axis, pos, a, b, kind: 'wall' });
-      for (const [a, b] of lintels) out.push({ axis: edge.axis, pos, a, b, kind: 'lintel' });
-    }
+      const at = (t) => [edge.p[0] + edge.u[0] * t, edge.p[1] + edge.u[1] * t];
+      const innerAt = (t) => {
+        if (t < EPS) return inner[i];
+        if (t > edge.len - EPS) return inner[(i + 1) % edges.length];
+        const [x, z] = at(t);
+        return [x + edge.n[0] * T, z + edge.n[1] * T];
+      };
+      const quad = ([a, b]) => [at(a), at(b), innerAt(b), innerAt(a)];
+      for (const s of segments) out.push({ quad: quad(s), len: s[1] - s[0], kind: 'wall' });
+      for (const s of lintels) out.push({ quad: quad(s), len: s[1] - s[0], kind: 'lintel' });
+    });
   }
   return out;
 }

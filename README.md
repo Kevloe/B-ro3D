@@ -39,7 +39,18 @@ Deployment auf Ubuntu mit nginx: siehe [deploy/README.md](deploy/README.md) (`np
   - `R` Raum zeichnen, `V` Auswählen, Ziehen = verschieben, Griffe = Größe ändern
   - `Entf` löschen, `Strg+D` duplizieren, Pfeiltasten verschieben, `Strg+Z / Strg+Y`
   - `Alt` beim Ziehen = ohne Raster
-  - Etagen anlegen, duplizieren, sortieren, löschen
+  - **Raumform** (rechts unter „Form“): Rechteck, **L-Form** (Aussparung an einer Ecke) oder **schräge Wand**
+    (Ecke diagonal abgeschnitten). Ecke und Größe rechts einstellen oder am Rauten-Griff im Grundriss ziehen.
+  - **Fläche** in m² steht im Grundriss, in der Raumliste und rechts beim Raum (plus Summe der Etage);
+    in der Übersicht im Raum-Dialog, in der Raumliste und je Etage
+  - Etagen anlegen (`+ OG` oben, `+ UG` unten), duplizieren, sortieren, löschen
+  - **Hintergrundbild pro Etage** (rechts unter „Etage“ → „Bild laden …“): Grundriss-Zeichnung (PNG, JPG, WebP, SVG)
+    als schwache Vorlage zum Nachzeichnen, nur im Editor sichtbar. Deckkraft per Regler (Standard 15 %).
+    **Maßstab setzen**: Anfang und Ende einer bekannten Strecke im Bild anklicken und die echte Länge eingeben.
+    **Verschieben**: Bild im Grundriss ziehen. Das Bild wird beim Laden verkleinert/komprimiert und mit exportiert.
+  - **Untergeschosse**: Eine Etage ist das Erdgeschoss (Geländehöhe, rechts unter „Etage“ → „Als Erdgeschoss festlegen“).
+    Alles darunter liegt in 3D unter dem Gelände; ist ein UG gewählt, wird das Gelände darunter gezeigt,
+    sonst scheint es durch. Ältere Dateien: die unterste Etage ist das Erdgeschoss.
   - Import / Export als JSON
 
 ### Bodentanks und Drucker
@@ -59,6 +70,9 @@ Deployment auf Ubuntu mit nginx: siehe [deploy/README.md](deploy/README.md) (`np
 - Im Grundriss erscheinen Stufen und Laufpfeil (Punkt = Antritt), in 3D führen die Stufen bis auf die Höhe der nächsten Etage.
   Die Bodenplatte darüber bekommt dort eine Deckenöffnung. Ist die Etage darüber ausgeblendet (oder „Wände niedrig“ aktiv),
   endet die Treppe an der Wandoberkante. Auf der obersten Etage wird keine Treppe nach oben gezeichnet.
+- **Aufzug in der Mitte** (Häkchen beim Treppenhaus): Aufzugsschacht im Treppenauge zwischen den beiden Läufen,
+  Tür zum Geschosspodest. Nur bei zweiläufigen Treppen; quer zur Laufrichtung braucht das Treppenhaus mindestens
+  ca. 3,1 m. Der Schacht wird auf jeder Etage gezeichnet, auch auf der obersten.
 
 Räume vom Typ **Flur** bekommen keine Wände zu angrenzenden Räumen; Räume, die an einen Flur grenzen,
 bekommen automatisch eine Tür.
