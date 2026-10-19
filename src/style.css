@@ -334,6 +334,19 @@ a.btn { text-decoration: none; color: inherit; }
 .tank.selected text { fill: var(--accent); }
 .plan-wrap[data-tool='tank'] .tank rect { cursor: crosshair; }
 .ref-room { fill: none; stroke: #9aa3b0; }
+.opening path { fill: none; }
+.opening .op-hit { stroke: transparent; cursor: move; pointer-events: stroke; }
+.opening .op-gap { stroke: #fff; stroke-linecap: butt; }
+.opening .op-leaf { stroke: #3b4352; stroke-linecap: round; }
+.opening .op-swing { stroke: #6b7482; }
+.opening .op-glass { stroke: #4f9fd1; stroke-linecap: butt; }
+.opening.selected .op-leaf, .opening.selected .op-swing, .opening.selected .op-glass { stroke: var(--accent); }
+.opening.detached { opacity: 0.55; }
+.opening.detached .op-gap { stroke: none; }
+.opening.draft-op { pointer-events: none; }
+.op-handle { cursor: ew-resize; }
+.plan-wrap[data-tool='door'] svg, .plan-wrap[data-tool='door'] .room .room-shape,
+.plan-wrap[data-tool='glass'] svg, .plan-wrap[data-tool='glass'] .room .room-shape { cursor: crosshair; }
 .underlay { pointer-events: none; mix-blend-mode: multiply; }
 .plan-wrap[data-tool='underlay'] svg { cursor: move; }
 .plan-wrap[data-tool='calibrate'] svg,

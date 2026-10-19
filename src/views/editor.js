@@ -37,6 +37,20 @@ import {
 } from '../data/stairs.js';
 import { WALL_THICKNESS } from '../three/walls.js';
 import {
+  createOpening,
+  DOOR_WIDTH,
+  isOnRoom,
+  isOnWall,
+  MIN_OPENING,
+  nearestWall,
+  OPENING_TYPES,
+  openingDir,
+  openingLength,
+  round3,
+  translateOpening,
+  wallPoint,
+} from '../data/openings.js';
+import {
   clampCut,
   CUT_CORNERS,
   defaultCut,
@@ -78,6 +92,8 @@ export function createEditor(root) {
             <button class="btn sm" data-act="tool-select" data-tool="select" title="Auswählen / Verschieben (V)">Auswählen</button>
             <button class="btn sm" data-act="tool-draw" data-tool="draw" title="Raum aufziehen (R)">Raum zeichnen</button>
             <button class="btn sm" data-act="tool-stairs" data-tool="stairs" title="Treppenhaus aufziehen (S)">Treppenhaus</button>
+            <button class="btn sm" data-act="tool-door" data-tool="door" title="Tür auf eine Wand setzen (D)">Tür</button>
+            <button class="btn sm" data-act="tool-glass" data-tool="glass" title="Glaswand entlang einer Wand ziehen (G)">Glaswand</button>
             <button class="btn sm" data-act="tool-tank" data-tool="tank" title="Bodentank in einen Raum setzen (T)">Bodentank setzen</button>
             <button class="btn sm" data-act="tool-printer" data-tool="printer" title="Drucker in einen Raum oder Flur setzen (P)">Drucker setzen</button>
           </div>
@@ -148,6 +164,7 @@ export function createEditor(root) {
     selectedRoomId: null,
     selectedTankId: null,
     selectedPrinterId: null,
+    selectedOpeningId: null,
     tool: 'select',
     snap: 0.5,
     tankModal: false,
@@ -156,6 +173,7 @@ export function createEditor(root) {
   let drag = null;
   let draftRect = null;
   let calib = null; // Maßstab setzen: { a: [x, z], b, hover }
+  let draftGlass = null; // Glaswand beim Aufziehen: { x1, z1, x2, z2 }
   // 'props' | 'modal': dieses Formular beim nächsten Render nicht neu zeichnen, damit der Fokus bleibt
   let changeSource = null;
   let lastTankClick = { id: null, time: 0 };
@@ -186,6 +204,12 @@ export function createEditor(root) {
   const selectedPrinter = () => selectedRoom()?.printers.find((p) => p.id === state.selectedPrinterId) ?? null;
   const printerById = (b) =>
     roomById(b, state.selectedRoomId)?.printers.find((p) => p.id === state.selectedPrinterId);
+  const floorOpenings = () => currentFloor()?.openings ?? [];
+  const selectedOpening = () => floorOpenings().find((o) => o.id === state.selectedOpeningId) ?? null;
+  const openingById = (b) =>
+    b.floors.find((f) => f.id === state.floorId)?.openings?.find((o) => o.id === state.selectedOpeningId);
+  /** Fangbereich für Wände: 14 px, mindestens 0,25 m. */
+  const wallAt = (w) => nearestWall(currentFloor().rooms, [w.x, w.z], Math.max(0.25, 14 / plan.scale));
   const snapValue = (v, free, step = state.snap) => (free ? Math.round(v * 100) / 100 : Math.round(v / step) * step);
   const round2 = (v) => Math.round(v * 100) / 100;
 
@@ -328,6 +352,9 @@ export function createEditor(root) {
         </g>`);
     }
 
+    for (const o of floorOpenings()) parts.push(renderOpening(o, floor, px));
+    if (draftGlass) parts.push(renderOpening({ ...draftGlass, id: '', type: 'glass' }, floor, px, true));
+
     // Bodentanks (mindestens 12 px groß, damit sie greifbar bleiben)
     const ts = Math.max(TANK_SIZE, 12 * px);
     const showTankText = s > 18;
@@ -438,6 +465,89 @@ export function createEditor(root) {
     renderUnderlay(floor);
     planWrap.dataset.tool = state.tool;
   }
+
+  /**
+   * Tür: Lücke in der Wand, Türblatt und Schwenkbogen (Anschlag über `swing`).
+   * Glaswand: blaue Doppellinie. Liegt die Öffnung auf keiner Wand, wird sie gestrichelt gezeigt.
+   */
+  function renderOpening(o, floor, px, draft = false) {
+    const sel = o.id && o.id === state.selectedOpeningId;
+    const detached = !draft && !isOnWall(o, floor.rooms);
+    const line = `M ${o.x1} ${o.z1} L ${o.x2} ${o.z2}`;
+    let symbol;
+    if (o.type === 'door') {
+      const len = openingLength(o);
+      const [ux, uz] = openingDir(o);
+      const side = o.swing & 2 ? -1 : 1;
+      const atB = o.swing & 1;
+      const [hx, hz] = atB ? [o.x2, o.z2] : [o.x1, o.z1];
+      const [ex, ez] = atB ? [o.x1, o.z1] : [o.x2, o.z2];
+      const lx = hx - uz * side * len;
+      const lz = hz + ux * side * len;
+      const cross = (lx - hx) * (ez - hz) - (lz - hz) * (ex - hx);
+      symbol = `
+        <path class="op-gap" d="${line}" stroke-width="${5 * px}"/>
+        <path class="op-leaf" d="M ${hx} ${hz} L ${lx} ${lz}" stroke-width="${2 * px}"/>
+        <path class="op-swing" d="M ${lx} ${lz} A ${len} ${len} 0 0 ${cross > 0 ? 1 : 0} ${ex} ${ez}"
+          stroke-width="${px}" stroke-dasharray="${3 * px} ${2 * px}"/>`;
+    } else {
+      symbol = `
+        <path class="op-gap" d="${line}" stroke-width="${5 * px}"/>
+        <path class="op-glass" d="${line}" stroke-width="${3.5 * px}"/>`;
+    }
+    const handles = sel
+      ? [['a', o.x1, o.z1], ['b', o.x2, o.z2]]
+          .map(
+            ([k, x, z]) =>
+              `<circle class="handle op-handle" data-ohandle="${k}" cx="${x}" cy="${z}" r="${4.5 * px}" stroke-width="${1.5 * px}"/>`,
+          )
+          .join('')
+      : '';
+    return `
+      <g class="opening op-${o.type}${sel ? ' selected' : ''}${detached ? ' detached' : ''}${draft ? ' draft-op' : ''}"
+        ${o.id ? `data-opening="${o.id}"` : ''}>
+        ${symbol}
+        <path class="op-hit" d="${line}" stroke-width="${14 * px}"/>
+        ${handles}
+      </g>`;
+  }
+
+  /** Neue Tür mittig an der angeklickten Stelle der nächsten Wand. */
+  function addDoor(w, free) {
+    const wall = wallAt(w);
+    if (!wall) return;
+    const width = Math.min(DOOR_WIDTH, wall.len);
+    const mid = snapValue(wall.t, free, TANK_SNAP);
+    const a = clamp(mid - width / 2, 0, wall.len - width);
+    const [x1, z1] = wallPoint(wall, a);
+    const [x2, z2] = wallPoint(wall, a + width);
+    addOpening({ type: 'door', x1: round3(x1), z1: round3(z1), x2: round3(x2), z2: round3(z2) });
+  }
+
+  function addOpening(props) {
+    const o = createOpening(props);
+    store.mutate((b) => {
+      const f = b.floors.find((x) => x.id === state.floorId);
+      (f.openings ??= []).push(o);
+    });
+    selectOpening(o.id);
+  }
+
+  function selectOpening(id) {
+    state.selectedOpeningId = id;
+    state.selectedRoomId = null;
+    state.selectedTankId = null;
+    state.selectedPrinterId = null;
+    preview.setSelectedRoom(null);
+    preview.setSelectedTank(null);
+    preview.setSelectedPrinter(null);
+    renderPlan();
+    renderProps();
+    renderRoomList();
+  }
+
+  /** Türen und Glaswände auf dem Umriss eines Raums – sie wandern beim Verschieben mit. */
+  const attachedOpenings = (floor, room) => (floor.openings ?? []).filter((o) => isOnRoom(o, room));
 
   /** Hintergrundbild der Etage: nur Attribute setzen, das Bild selbst nur bei Wechsel. */
   function renderUnderlay(floor) {
@@ -585,6 +695,8 @@ export function createEditor(root) {
       draw: 'Raum zeichnen: Rechteck mit gedrückter Maustaste aufziehen · Esc zum Beenden',
       stairs: 'Treppenhaus zeichnen: Rechteck aufziehen · Form und Laufrichtung rechts einstellen · Esc zum Beenden',
       tank: 'Bodentank setzen: in einen Raum klicken · Esc zum Beenden',
+      door: 'Tür setzen: auf eine Wand klicken (auch zwischen zwei Räumen) · Alt = ohne Raster · Esc zum Beenden',
+      glass: 'Glaswand: an einer Wand entlang ziehen (Klick = 2 m) · Alt = ohne Raster · Esc zum Beenden',
       printer: 'Drucker setzen: in einen Raum oder Flur klicken · Esc zum Beenden',
       calibrate: 'Maßstab setzen: Anfang und Ende einer bekannten Strecke im Hintergrundbild anklicken, dann die echte Länge eingeben · Esc zum Beenden',
       underlay: 'Hintergrundbild verschieben: im Grundriss ziehen · Esc zum Beenden',
@@ -612,6 +724,32 @@ export function createEditor(root) {
           <button class="btn sm danger" data-act="tank-del">Löschen</button>
         </div>
         <span class="hint-text">Tipp: Doppelklick auf den Tank oder Enter öffnet den Editor.</span>
+      </section>`;
+  }
+
+  function renderOpeningSection(o, floor) {
+    const types = Object.entries(OPENING_TYPES)
+      .map(
+        ([k, l]) =>
+          `<button class="btn sm${o.type === k ? ' active' : ''}" data-act="opening-type" data-type="${k}">${esc(l)}</button>`,
+      )
+      .join('');
+    return `
+      <section class="panel">
+        <h2 class="panel-title">${esc(OPENING_TYPES[o.type])}</h2>
+        <div class="field"><span>Art</span><div class="seg seg-fill">${types}</div></div>
+        <label class="field"><span>Breite (m)</span>
+          <input class="input" type="number" step="0.1" min="${MIN_OPENING}" data-bind="opening:width" value="${round2(openingLength(o))}">
+        </label>
+        ${o.type === 'door' ? `<button class="btn sm" data-act="opening-swing" title="Anschlag und Öffnungsrichtung wechseln">Aufschlag drehen</button>` : ''}
+        ${
+          isOnWall(o, floor.rooms)
+            ? `<span class="hint-text">Ziehen = entlang der Wand verschieben · Enden ziehen = Breite ändern</span>`
+            : `<span class="field-warn">Liegt auf keiner Wand und wird in 3D nicht dargestellt. Auf eine Wand ziehen oder löschen.</span>`
+        }
+        <div class="btn-row">
+          <button class="btn sm danger" data-act="opening-del">Löschen</button>
+        </div>
       </section>`;
   }
 
@@ -844,6 +982,7 @@ export function createEditor(root) {
       </section>`;
 
     $('#e-props').innerHTML = `
+      ${selectedOpening() ? renderOpeningSection(selectedOpening(), floor) : ''}
       ${tank ? renderTankSection(tank) : ''}
       ${printer ? renderPrinterSection(printer) : ''}
       ${roomSection}
@@ -957,6 +1096,14 @@ export function createEditor(root) {
       : `<div class="empty">Noch keine Räume.</div>`;
   }
 
+  function updateDraftGlass(t1) {
+    drag.t1 = t1;
+    const [x1, z1] = wallPoint(drag.wall, Math.min(drag.t0, t1));
+    const [x2, z2] = wallPoint(drag.wall, Math.max(drag.t0, t1));
+    draftGlass = { x1, z1, x2, z2 };
+    renderPlan();
+  }
+
   /** Flächenangaben aktualisieren, ohne das Formular neu zu zeichnen (Fokus bleibt). */
   function updateAreas() {
     const room = selectedRoom();
@@ -987,9 +1134,11 @@ export function createEditor(root) {
     if (
       state.selectedRoomId === roomId &&
       state.selectedTankId === tankId &&
-      state.selectedPrinterId === printerId
+      state.selectedPrinterId === printerId &&
+      !state.selectedOpeningId
     )
       return;
+    state.selectedOpeningId = null;
     state.selectedRoomId = roomId;
     state.selectedTankId = roomId ? tankId : null;
     state.selectedPrinterId = roomId ? printerId : null;
@@ -1003,6 +1152,7 @@ export function createEditor(root) {
 
   function setFloor(floorId, { fit = false } = {}) {
     state.floorId = floorId;
+    state.selectedOpeningId = null;
     state.selectedRoomId = null;
     state.selectedTankId = null;
     state.selectedPrinterId = null;
@@ -1019,6 +1169,7 @@ export function createEditor(root) {
     // Die Knöpfe „Maßstab setzen“ / „Verschieben“ in der Seitenleiste zeigen den Modus an
     const panelTool = [state.tool, tool].some((t) => t === 'calibrate' || t === 'underlay');
     if (tool !== 'calibrate') calib = null;
+    draftGlass = null;
     state.tool = tool;
     renderToolbar();
     renderPlan();
@@ -1082,6 +1233,15 @@ export function createEditor(root) {
   }
 
   function deleteSelected() {
+    if (state.selectedOpeningId) {
+      const id = state.selectedOpeningId;
+      state.selectedOpeningId = null;
+      store.mutate((b) => {
+        const f = b.floors.find((x) => x.id === state.floorId);
+        f.openings = f.openings.filter((o) => o.id !== id);
+      });
+      return;
+    }
     if (state.selectedPrinterId) {
       const printerId = state.selectedPrinterId;
       state.selectedPrinterId = null;
@@ -1105,7 +1265,10 @@ export function createEditor(root) {
     state.selectedRoomId = null;
     store.mutate((b) => {
       const f = b.floors.find((x) => x.id === state.floorId);
+      const room = f.rooms.find((r) => r.id === id);
       f.rooms = f.rooms.filter((r) => r.id !== id);
+      // Türen/Glas nur dieses Raums (z. B. in einer Außenwand) gehen mit, gemeinsame mit Nachbarn bleiben
+      if (f.openings) f.openings = f.openings.filter((o) => !isOnRoom(o, room) || isOnWall(o, f.rooms));
     });
   }
 
@@ -1136,6 +1299,7 @@ export function createEditor(root) {
         return;
       }
       const r = roomById(b, state.selectedRoomId);
+      for (const o of attachedOpenings(b.floors.find((f) => f.id === state.floorId), r)) translateOpening(o, dx, dz);
       r.x = round2(r.x + dx);
       r.z = round2(r.z + dz);
     });
@@ -1185,6 +1349,7 @@ export function createEditor(root) {
         height: src.height,
         rooms: src.rooms.map((r) => cloneRoom(r)),
         ...(src.underlay ? { underlay: { ...src.underlay } } : {}),
+        ...(src.openings?.length ? { openings: src.openings.map(({ id, ...o }) => createOpening(o)) } : {}),
       });
       store.mutate((b) => b.floors.splice(idx + 1, 0, copy));
       setFloor(copy.id);
@@ -1206,6 +1371,18 @@ export function createEditor(root) {
     'tool-select': () => setTool('select'),
     'tool-draw': () => setTool('draw'),
     'tool-stairs': () => setTool('stairs'),
+    'tool-door': () => setTool('door'),
+    'tool-glass': () => setTool('glass'),
+    'opening-type': (btn) => {
+      store.mutate((b) => (openingById(b).type = btn.dataset.type));
+    },
+    'opening-swing': () => {
+      store.mutate((b) => {
+        const o = openingById(b);
+        o.swing = (o.swing + 1) % 4;
+      });
+    },
+    'opening-del': deleteSelected,
     'stairs-rotate': () => {
       store.mutate((b) => {
         const r = roomById(b, state.selectedRoomId);
@@ -1373,6 +1550,24 @@ export function createEditor(root) {
       changeSource = null;
       return;
     }
+    if (scope === 'opening' && key === 'width') {
+      const width = parseFloat(String(value).replace(',', '.'));
+      if (!(width >= MIN_OPENING)) return renderProps();
+      // Mitte bleibt, beide Enden wandern
+      store.mutate((b) => {
+        const o = openingById(b);
+        const [ux, uz] = openingDir(o);
+        const cx = (o.x1 + o.x2) / 2;
+        const cz = (o.z1 + o.z2) / 2;
+        Object.assign(o, {
+          x1: round3(cx - (ux * width) / 2),
+          z1: round3(cz - (uz * width) / 2),
+          x2: round3(cx + (ux * width) / 2),
+          z2: round3(cz + (uz * width) / 2),
+        });
+      });
+      return;
+    }
     if (scope === 'tank' && key === 'count') {
       const count = clamp(parseInt(value, 10) || 0, 0, MAX_PORTS);
       store.mutate((b) => {
@@ -1405,6 +1600,11 @@ export function createEditor(root) {
               ? b.floors.find((f) => f.id === state.floorId)
               : b;
       if (!target) return;
+      if (scope === 'room' && (key === 'x' || key === 'z')) {
+        const d = value - target[key];
+        const f = b.floors.find((x) => x.id === state.floorId);
+        for (const o of attachedOpenings(f, target)) translateOpening(o, key === 'x' ? d : 0, key === 'z' ? d : 0);
+      }
       target[key] = value;
       const room = roomById(b, state.selectedRoomId);
       if (scope === 'room' && ['width', 'depth', 'cutW', 'cutD'].includes(key)) clampCut(room);
@@ -1469,6 +1669,19 @@ export function createEditor(root) {
       draftRect = { x: p.x, z: p.z, width: 0, depth: 0 };
       return;
     }
+    if (state.tool === 'door') {
+      addDoor(w, e.altKey);
+      return;
+    }
+    if (state.tool === 'glass') {
+      const wall = wallAt(w);
+      if (wall) {
+        const t = snapValue(wall.t, e.altKey, TANK_SNAP);
+        drag = { type: 'glass', wall, t0: clamp(t, 0, wall.len) };
+        updateDraftGlass(drag.t0);
+      }
+      return;
+    }
     if (state.tool === 'tank') {
       const room = roomAt(w);
       if (room) {
@@ -1487,6 +1700,17 @@ export function createEditor(root) {
           z: snapValue(w.z - room.z, e.altKey, TANK_SNAP),
         });
       }
+      return;
+    }
+    const oHandleEl = e.target.closest('[data-ohandle]');
+    const openingEl = e.target.closest('[data-opening]');
+    if (oHandleEl && selectedOpening()) {
+      drag = { type: 'opening-end', end: oHandleEl.dataset.ohandle, start: w, orig: { ...selectedOpening() }, started: false };
+      return;
+    }
+    if (openingEl) {
+      selectOpening(openingEl.dataset.opening);
+      drag = { type: 'opening', start: w, orig: { ...selectedOpening() }, started: false };
       return;
     }
     if (printerEl) {
@@ -1527,7 +1751,8 @@ export function createEditor(root) {
     if (roomEl) {
       select(roomEl.dataset.room);
       const r = selectedRoom();
-      drag = { type: 'move', start: w, orig: { x: r.x, z: r.z }, started: false };
+      const openings = attachedOpenings(currentFloor(), r).map((o) => ({ ...o }));
+      drag = { type: 'move', start: w, orig: { x: r.x, z: r.z, openings }, started: false };
       return;
     }
     select(null);
@@ -1547,6 +1772,13 @@ export function createEditor(root) {
       plan.cx = drag.cx - (e.clientX - drag.sx) / plan.scale;
       plan.cz = drag.cz - (e.clientY - drag.sy) / plan.scale;
       renderPlan();
+      return;
+    }
+
+    if (drag.type === 'glass') {
+      const { wall } = drag;
+      const t = (w.x - wall.p[0]) * wall.u[0] + (w.z - wall.p[1]) * wall.u[1];
+      updateDraftGlass(clamp(snapValue(t, e.altKey, TANK_SNAP), 0, wall.len));
       return;
     }
 
@@ -1572,6 +1804,26 @@ export function createEditor(root) {
     const free = e.altKey;
     store.mutate(
       (b) => {
+        if (drag.type === 'opening' || drag.type === 'opening-end') {
+          const o = openingById(b);
+          const src = drag.orig;
+          const [ux, uz] = openingDir(src);
+          const t = snapValue(dx * ux + dz * uz, free, TANK_SNAP);
+          if (drag.type === 'opening') {
+            Object.assign(o, { x1: src.x1, z1: src.z1, x2: src.x2, z2: src.z2 });
+            translateOpening(o, ux * t, uz * t);
+          } else if (drag.end === 'a') {
+            // Ende entlang der Wand ziehen, Mindestbreite bleibt
+            const s = Math.min(t, openingLength(src) - MIN_OPENING);
+            o.x1 = round3(src.x1 + ux * s);
+            o.z1 = round3(src.z1 + uz * s);
+          } else {
+            const s = Math.max(t, MIN_OPENING - openingLength(src));
+            o.x2 = round3(src.x2 + ux * s);
+            o.z2 = round3(src.z2 + uz * s);
+          }
+          return;
+        }
         if (drag.type === 'underlay') {
           const u = b.floors.find((f) => f.id === state.floorId).underlay;
           u.x = round2(drag.orig.x + dx);
@@ -1590,6 +1842,13 @@ export function createEditor(root) {
         if (drag.type === 'move') {
           r.x = round2(snapValue(drag.orig.x + dx, free));
           r.z = round2(snapValue(drag.orig.z + dz, free));
+          const f = b.floors.find((x) => x.id === state.floorId);
+          for (const src of drag.orig.openings) {
+            const o = f.openings.find((x) => x.id === src.id);
+            if (!o) continue;
+            Object.assign(o, { x1: src.x1, z1: src.z1, x2: src.x2, z2: src.z2 });
+            translateOpening(o, r.x - drag.orig.x, r.z - drag.orig.z);
+          }
           return;
         }
         const o = drag.orig;
@@ -1633,6 +1892,22 @@ export function createEditor(root) {
   });
 
   const endDrag = () => {
+    if (drag?.type === 'glass' && draftGlass) {
+      const { wall, t0 } = drag;
+      let [a, b] = [t0, drag.t1 ?? t0].sort((x, y) => x - y);
+      // nur geklickt: 2 m Glas um die Klickstelle
+      if (b - a < MIN_OPENING) {
+        const width = Math.min(2, wall.len);
+        a = clamp(t0 - width / 2, 0, wall.len - width);
+        b = a + width;
+      }
+      draftGlass = null;
+      drag = null;
+      const [x1, z1] = wallPoint(wall, a);
+      const [x2, z2] = wallPoint(wall, b);
+      addOpening({ type: 'glass', x1: round3(x1), z1: round3(z1), x2: round3(x2), z2: round3(z2) });
+      return;
+    }
     if (drag?.type === 'draw' && draftRect) {
       const rect = draftRect;
       draftRect = null;
@@ -1681,16 +1956,20 @@ export function createEditor(root) {
     else if (key === 'enter' && state.selectedTankId) openTankModal();
     else if (key === 'escape') {
       draftRect = null;
+      draftGlass = null;
       calib = null;
       drag = null;
       setTool('select');
-      if (state.selectedTankId || state.selectedPrinterId) select(state.selectedRoomId, null);
+      if (state.selectedOpeningId) select(null);
+      else if (state.selectedTankId || state.selectedPrinterId) select(state.selectedRoomId, null);
       else select(null);
     } else if (key === 'r' && !ctrl) setTool('draw');
     else if (key === 's' && !ctrl) setTool('stairs');
     else if (key === 'q' && !ctrl && selectedRoom()?.type === 'stairs') actions['stairs-rotate']();
     else if (key === 't' && !ctrl) setTool('tank');
     else if (key === 'p' && !ctrl) setTool('printer');
+    else if (key === 'd' && !ctrl) setTool('door');
+    else if (key === 'g' && !ctrl) setTool('glass');
     else if (key === 'v' && !ctrl) setTool('select');
     else if (key.startsWith('arrow') && state.selectedRoomId) {
       const base = state.selectedTankId || state.selectedPrinterId ? TANK_SNAP : state.snap;
@@ -1707,6 +1986,7 @@ export function createEditor(root) {
     if (state.selectedRoomId && !selectedRoom()) state.selectedRoomId = null;
     if (state.selectedTankId && !selectedTank()) state.selectedTankId = null;
     if (state.selectedPrinterId && !selectedPrinter()) state.selectedPrinterId = null;
+    if (state.selectedOpeningId && !selectedOpening()) state.selectedOpeningId = null;
     syncPreview();
     renderToolbar();
     renderPlan();

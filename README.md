@@ -77,6 +77,16 @@ Deployment auf Ubuntu mit nginx: siehe [deploy/README.md](deploy/README.md) (`np
 Räume vom Typ **Flur** bekommen keine Wände zu angrenzenden Räumen; Räume, die an einen Flur grenzen,
 bekommen automatisch eine Tür.
 
+### Türen und Glaswände
+
+- **Tür** (`D` im Editor): auf eine Wand klicken – zwischen zwei Räumen, zum Flur oder nach außen. Eine eigene
+  Tür zum Flur ersetzt dort die automatische. „Aufschlag drehen“ wechselt Anschlag und Öffnungsrichtung im Grundriss.
+- **Glaswand** (`G`): an einer Wand entlang ziehen (Klick = 2 m). In 3D eine Glasscheibe mit Profilen oben und unten.
+- Anklicken = auswählen, ziehen = entlang der Wand verschieben, Enden ziehen = Breite ändern, `Entf` = löschen.
+  Rechts lässt sich zwischen Tür und Glaswand wechseln und die Breite eingeben.
+- Wird ein Raum verschoben, wandern seine Türen und Glaswände mit. Liegt eine nicht mehr auf einer Wand,
+  wird sie im Grundriss blass gezeigt und in 3D nicht dargestellt.
+
 „Beispiel laden“ stellt das Testgebäude (Flur mit 6 Räumen) wieder her.
 
 ## Struktur

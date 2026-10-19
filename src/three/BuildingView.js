@@ -416,8 +416,26 @@ export class BuildingView {
     }
 
     const wallMat = material({ color: 0xfbfbf9, roughness: 0.7 });
-    for (const seg of computeWalls(floor.rooms)) {
+    let glassMat = null;
+    let frameMat = null;
+    for (const seg of computeWalls(floor.rooms, 1, floor.openings ?? [])) {
       if (seg.len < 0.01) continue;
+      if (seg.kind === 'glass') {
+        glassMat ??= material({ color: 0x9cc7e0, roughness: 0.05, metalness: 0.1, transparent: true, opacity: 0.32, depthWrite: false });
+        frameMat ??= material({ color: 0x5b6573, roughness: 0.5, metalness: 0.4 });
+        const prof = Math.min(0.05, wallH / 4);
+        const pane = new THREE.Mesh(prismGeometry(seg.quad, wallH - prof * 2), glassMat);
+        pane.position.y = prof;
+        group.add(pane);
+        // Profile unten und oben
+        for (const y of [0, wallH - prof]) {
+          const frame = new THREE.Mesh(prismGeometry(seg.quad, prof), frameMat);
+          frame.position.y = y;
+          frame.castShadow = true;
+          group.add(frame);
+        }
+        continue;
+      }
       if (seg.kind === 'lintel' && (low || wallH <= DOOR_H + 0.05)) continue;
       const h = seg.kind === 'wall' ? wallH : wallH - DOOR_H;
       const wall = new THREE.Mesh(prismGeometry(seg.quad, h), wallMat);
@@ -515,10 +533,14 @@ export class BuildingView {
       group.visible = state !== 'hidden';
       for (const m of group.userData.mats) {
         const ghost = state === 'ghost';
-        if (m.transparent !== ghost) m.needsUpdate = true;
-        m.transparent = ghost;
-        m.opacity = ghost ? 0.14 : 1;
-        m.depthWrite = !ghost;
+        // Glas ist von sich aus durchsichtig: Grundwerte beim ersten Mal merken
+        m.userData.base ??= { opacity: m.opacity, transparent: m.transparent, depthWrite: m.depthWrite };
+        const base = m.userData.base;
+        const transparent = ghost || base.transparent;
+        if (m.transparent !== transparent) m.needsUpdate = true;
+        m.transparent = transparent;
+        m.opacity = ghost ? Math.min(0.14, base.opacity) : base.opacity;
+        m.depthWrite = !ghost && base.depthWrite;
       }
       for (const label of group.userData.labels) {
         label.visible = state === 'full' && this.options.labels;

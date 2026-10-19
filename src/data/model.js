@@ -129,6 +129,21 @@ function normalizeUnderlay(u) {
   };
 }
 
+/** Tür oder Glaswand, vom Editor auf eine Wandlinie gelegt (Strecke in Weltkoordinaten). */
+function normalizeOpening(o) {
+  const v = [o?.x1, o?.z1, o?.x2, o?.z2].map(Number);
+  if (!v.every(Number.isFinite) || Math.hypot(v[2] - v[0], v[3] - v[1]) < 0.05) return null;
+  return {
+    id: o.id || uid('o'),
+    type: o.type === 'glass' ? 'glass' : 'door',
+    x1: v[0],
+    z1: v[1],
+    x2: v[2],
+    z2: v[3],
+    swing: [0, 1, 2, 3].includes(o.swing) ? o.swing : 0, // Türanschlag im Grundriss
+  };
+}
+
 export function defaultFloorName(level) {
   if (level === 0) return 'Erdgeschoss';
   return level > 0 ? `${level}. Obergeschoss` : `${-level}. Untergeschoss`;
@@ -191,6 +206,9 @@ export function normalizeBuilding(data) {
     height: Math.max(2, num(f.height, 3)),
     // nur wenn vorhanden, damit Dateien ohne Bild unverändert bleiben
     ...(normalizeUnderlay(f.underlay) ? { underlay: normalizeUnderlay(f.underlay) } : {}),
+    ...(Array.isArray(f.openings) && f.openings.length
+      ? { openings: f.openings.map(normalizeOpening).filter(Boolean) }
+      : {}),
     rooms: (Array.isArray(f.rooms) ? f.rooms : []).map((r) => ({
       id: r.id || uid('r'),
       name: String(r.name ?? 'Raum'),
