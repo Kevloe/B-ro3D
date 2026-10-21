@@ -4,11 +4,14 @@
  * - 'l':       rechteckige Aussparung → L-förmiger Raum
  * - 'chamfer': dreieckige Aussparung → schräge Wand
  * Größe der Aussparung: cutW (entlang x) × cutD (entlang z), Ecke: cutCorner.
+ * - 'poly':    beliebiger Umriss aus `points` ([[x, z], …] relativ zu x/z, im Uhrzeigersinn);
+ *              width/depth sind dann das umschließende Rechteck der Punkte.
  */
 export const ROOM_SHAPES = {
   rect: 'Rechteck',
   l: 'L-Form',
   chamfer: 'Schräge Wand',
+  poly: 'Polygon',
 };
 
 export const CUT_CORNERS = {
@@ -63,8 +66,11 @@ export const worldToRoom = (room, p) => rotatePoint(p, roomCenter(room), -roomRo
 export const vectorToRoom = (room, v) => rotatePoint(v, [0, 0], -roomRotation(room));
 
 /** Form eines Raums; Treppenhäuser sind immer rechteckig. */
-export const roomShape = (room) =>
-  room.type !== 'stairs' && (room.shape === 'l' || room.shape === 'chamfer') ? room.shape : 'rect';
+export function roomShape(room) {
+  if (room.type === 'stairs') return 'rect';
+  if (room.shape === 'poly') return Array.isArray(room.points) && room.points.length >= 3 ? 'poly' : 'rect';
+  return room.shape === 'l' || room.shape === 'chamfer' ? room.shape : 'rect';
+}
 
 /** Hält die Aussparung innerhalb sinnvoller Grenzen (verändert den Raum). */
 export function clampCut(room) {
@@ -101,6 +107,7 @@ export function localPolygon(room) {
   const corners = { nw: [x0, z0], ne: [x1, z0], se: [x1, z1], sw: [x0, z1] };
   const shape = roomShape(room);
   if (shape === 'rect') return CORNER_ORDER.map((c) => corners[c]);
+  if (shape === 'poly') return room.points.map(([px, pz]) => [x0 + px, z0 + pz]);
 
   const i = Math.max(0, CORNER_ORDER.indexOf(room.cutCorner));
   const P = corners[CORNER_ORDER[i]];
@@ -138,6 +145,7 @@ export function roomPieces(room) {
 }
 
 function localPieces(room) {
+  if (roomShape(room) === 'poly') return triangulate(localPolygon(room));
   if (roomShape(room) !== 'l') return [localPolygon(room)];
   const { x, z, width: w, depth: d, cutW, cutD } = room;
   const c = room.cutCorner;
@@ -181,6 +189,12 @@ function centroid(poly) {
 
 /** Punkt für die Beschriftung: Mitte des größten Teils, liegt also immer im Raum. */
 export function roomLabelPoint(room) {
+  if (roomShape(room) === 'poly') {
+    // Schwerpunkt, wenn er im Raum liegt (bei den meisten Formen), sonst Mitte des größten Dreiecks
+    const poly = roomPolygon(room);
+    const c = centroid(poly);
+    if (pointInPolygon(c, poly) && nearestOnPolygon(poly, c).dist > 0.5) return c;
+  }
   const pieces = roomPieces(room);
   const best = pieces.reduce((m, p) => (polygonArea(p) > polygonArea(m) ? p : m), pieces[0]);
   return centroid(best);
@@ -306,4 +320,132 @@ function clipHalf(poly, a, b) {
     }
   }
   return out.length >= 3 && polygonArea(out) > 1e-6 ? out : null;
+}
+
+// ---------------------------------------------------------------- Polygon-Räume
+
+const signedArea = (poly) => {
+  let a = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const [x1, z1] = poly[i];
+    const [x2, z2] = poly[(i + 1) % poly.length];
+    a += x1 * z2 - x2 * z1;
+  }
+  return a / 2;
+};
+
+/** Schneiden sich die Strecken a–b und c–d (Berühren an den Enden zählt nicht)? */
+function segmentsCross(a, b, c, d) {
+  const o = (p, q, r) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+  const d1 = o(c, d, a);
+  const d2 = o(c, d, b);
+  const d3 = o(a, b, c);
+  const d4 = o(a, b, d);
+  return ((d1 > EPS && d2 < -EPS) || (d1 < -EPS && d2 > EPS)) && ((d3 > EPS && d4 < -EPS) || (d3 < -EPS && d4 > EPS));
+}
+
+/** Überschneidet sich der Umriss selbst (dann ist er als Raum nicht brauchbar)? */
+export function selfIntersects(poly) {
+  const n = poly.length;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 2; j < n; j++) {
+      if (i === 0 && j === n - 1) continue; // Nachbarkanten
+      if (segmentsCross(poly[i], poly[(i + 1) % n], poly[j], poly[(j + 1) % n])) return true;
+    }
+  }
+  return false;
+}
+
+/** Doppelte und auf einer Linie liegende Punkte entfernen. */
+export function cleanPolygon(poly) {
+  let pts = poly.filter((p, i) => {
+    const q = poly[(i + 1) % poly.length];
+    return Math.hypot(p[0] - q[0], p[1] - q[1]) > 1e-3;
+  });
+  let changed = true;
+  while (changed && pts.length > 3) {
+    changed = false;
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[(i + pts.length - 1) % pts.length];
+      const b = pts[i];
+      const c = pts[(i + 1) % pts.length];
+      const cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]) * Math.hypot(c[0] - b[0], c[1] - b[1]) || 1;
+      if (Math.abs(cross) / len < 1e-4) {
+        pts.splice(i, 1);
+        changed = true;
+        break;
+      }
+    }
+  }
+  return pts;
+}
+
+/** Brauchbarer Raumumriss? Mindestens drei Punkte, Fläche, keine Selbstüberschneidung. */
+export const isValidPolygon = (poly) =>
+  poly.length >= 3 && Math.abs(signedArea(poly)) > 0.05 && !selfIntersects(poly);
+
+/**
+ * Raum-Eigenschaften aus einem Umriss in Grundriss-Koordinaten (ohne Drehung):
+ * x/z/width/depth = umschließendes Rechteck, `points` relativ dazu und im Uhrzeigersinn.
+ */
+export function polygonRoomProps(poly) {
+  const pts = signedArea(poly) < 0 ? [...poly].reverse() : poly;
+  const xs = pts.map((p) => p[0]);
+  const zs = pts.map((p) => p[1]);
+  const x = Math.min(...xs);
+  const z = Math.min(...zs);
+  const r3 = (v) => Math.round(v * 1000) / 1000;
+  return {
+    x: r3(x),
+    z: r3(z),
+    width: r3(Math.max(...xs) - x),
+    depth: r3(Math.max(...zs) - z),
+    shape: 'poly',
+    points: pts.map(([px, pz]) => [r3(px - x), r3(pz - z)]),
+  };
+}
+
+/**
+ * Neuer Umriss (ungedreht, im Rahmen des bisherigen Raums) für einen gedrehten oder ungedrehten Raum:
+ * x/z werden so gesetzt, dass der Umriss in der Welt dort bleibt, wo er gezeichnet ist.
+ */
+export function applyPolygon(room, poly) {
+  const props = polygonRoomProps(poly);
+  const [cx, cz] = roomToWorld(room, [props.x + props.width / 2, props.z + props.depth / 2]);
+  const r3 = (v) => Math.round(v * 1000) / 1000;
+  Object.assign(room, props, { x: r3(cx - props.width / 2), z: r3(cz - props.depth / 2) });
+}
+
+/** Zerlegung eines einfachen Polygons in Dreiecke (Ohrenschneiden). */
+export function triangulate(poly) {
+  const pts = signedArea(poly) < 0 ? [...poly].reverse() : [...poly];
+  if (pts.length <= 3) return [pts];
+  const out = [];
+  // im Uhrzeigersinn (Grundriss) ist eine konvexe Ecke eine mit positivem Kreuzprodukt
+  const convex = (a, b, c) => (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]) > EPS;
+  const inside = (p, a, b, c) => {
+    const s1 = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+    const s2 = (c[0] - b[0]) * (p[1] - b[1]) - (c[1] - b[1]) * (p[0] - b[0]);
+    const s3 = (a[0] - c[0]) * (p[1] - c[1]) - (a[1] - c[1]) * (p[0] - c[0]);
+    return s1 >= -EPS && s2 >= -EPS && s3 >= -EPS;
+  };
+  let guard = pts.length * pts.length;
+  while (pts.length > 3 && guard-- > 0) {
+    let cut = false;
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[(i + pts.length - 1) % pts.length];
+      const b = pts[i];
+      const c = pts[(i + 1) % pts.length];
+      if (!convex(a, b, c)) continue;
+      if (pts.some((p) => p !== a && p !== b && p !== c && inside(p, a, b, c))) continue;
+      out.push([a, b, c]);
+      pts.splice(i, 1);
+      cut = true;
+      break;
+    }
+    if (!cut) break; // entartet: Rest als ein Stück
+  }
+  out.push(pts);
+  return out.filter((t) => polygonArea(t) > 1e-9);
 }

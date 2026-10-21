@@ -42,7 +42,11 @@ Deployment auf Ubuntu mit nginx: siehe [deploy/README.md](deploy/README.md) (`np
   - **Drehung**: Kreis-Griff über dem ausgewählten Raum ziehen (Raster 15°, `Alt` = frei) oder rechts unter „Drehung“
     eingeben bzw. mit ↺/↻ in 15°-Schritten. Gedreht wird um die Raummitte; Bodentanks, Drucker, Treppen, Türen
     und Glaswände drehen mit. X/Z bezeichnen die linke obere Ecke des Raums vor dem Drehen.
-  - **Raumform** (rechts unter „Form“): Rechteck, **L-Form** (Aussparung an einer Ecke) oder **schräge Wand**
+  - **Polygon-Raum** (`F`): Umriss Ecke für Ecke klicken, auf den Startpunkt klicken (oder Doppelklick / Enter) zum
+    Schließen; Rücktaste nimmt die letzte Ecke zurück, `Shift` = waagerecht/senkrecht, fängt Raumecken und Wandenden.
+    Beim ausgewählten Polygon-Raum Ecken ziehen, „+“ auf einer Kantenmitte ziehen = neue Ecke, Doppelklick auf
+    eine Ecke = entfernen. Jeder Raum lässt sich rechts unter „Form“ in ein Polygon umwandeln.
+  - **Raumform** (rechts unter „Form“): Rechteck, **L-Form** (Aussparung an einer Ecke), **schräge Wand** oder **Polygon**
     (Ecke diagonal abgeschnitten). Ecke und Größe rechts einstellen oder am Rauten-Griff im Grundriss ziehen.
   - **Fläche** in m² steht im Grundriss, in der Raumliste und rechts beim Raum (plus Summe der Etage);
     in der Übersicht im Raum-Dialog, in der Raumliste und je Etage

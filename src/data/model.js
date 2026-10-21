@@ -3,11 +3,14 @@ import { uid } from '../utils.js';
 import { STAIR_DIRS, STAIR_SHAPES } from './stairs.js';
 import {
   clampCut,
+  cleanPolygon,
   CUT_CORNERS,
+  isValidPolygon,
   localPolygon,
   nearestOnPolygon,
   normalizeRotation,
   pointInPolygon,
+  polygonRoomProps,
   ROOM_SHAPES,
   roomBounds,
   roomToWorld,
@@ -117,6 +120,7 @@ export function cloneRoom(room, props = {}) {
     id: uid('r'),
     tanks: room.tanks.map((t) => ({ ...t, id: uid('t'), ports: t.ports.map((p) => ({ ...p })) })),
     printers: room.printers.map((p) => ({ ...p, id: uid('p') })),
+    ...(room.points ? { points: room.points.map((p) => [...p]) } : {}),
     ...props,
   };
 }
@@ -145,6 +149,17 @@ function normalizeUnderlay(u) {
   };
 }
 
+/**
+ * Umriss eines Polygon-Raums (relativ zu x/z). Ungültige Umrisse → null, der Raum wird dann rechteckig.
+ */
+function normalizePoints(r) {
+  if (r.shape !== 'poly' || !Array.isArray(r.points)) return null;
+  const pts = r.points.map((p) => [Number(p?.[0]), Number(p?.[1])]);
+  if (!pts.every((p) => p.every(Number.isFinite))) return null;
+  const clean = cleanPolygon(pts);
+  return isValidPolygon(clean) ? clean : null;
+}
+
 /** Tür oder Glaswand, vom Editor auf eine Wandlinie gelegt (Strecke in Weltkoordinaten). */
 function normalizeOpening(o) {
   const v = [o?.x1, o?.z1, o?.x2, o?.z2].map(Number);
@@ -158,6 +173,14 @@ function normalizeOpening(o) {
     z2: v[3],
     swing: [0, 1, 2, 3].includes(o.swing) ? o.swing : 0, // Türanschlag im Grundriss
   };
+}
+
+/** Punkte (im Uhrzeigersinn, ab 0/0) und umschließendes Rechteck eines Polygon-Raums (sonst leer). */
+function polygonFields(r) {
+  const pts = normalizePoints(r);
+  if (!pts) return {};
+  const { x, z, width, depth, points } = polygonRoomProps(pts);
+  return { x: num(r.x, 0) + x, z: num(r.z, 0) + z, width, depth, points };
 }
 
 export function defaultFloorName(level) {
@@ -242,7 +265,7 @@ export function normalizeBuilding(data) {
       width: Math.max(0.5, num(r.width, 4)),
       depth: Math.max(0.5, num(r.depth, 4)),
       rotation: normalizeRotation(r.rotation),
-      shape: ROOM_SHAPES[r.shape] ? r.shape : 'rect',
+      shape: ROOM_SHAPES[r.shape] && (r.shape !== 'poly' || normalizePoints(r)) ? r.shape : 'rect',
       cutCorner: CUT_CORNERS[r.cutCorner] ? r.cutCorner : 'ne',
       cutW: num(r.cutW, 2),
       cutD: num(r.cutD, 2),
@@ -252,6 +275,7 @@ export function normalizeBuilding(data) {
       stairShape: STAIR_SHAPES[r.stairShape] ? r.stairShape : 'u-left',
       stairDir: STAIR_DIRS[r.stairDir] ? r.stairDir : 'n',
       elevator: Boolean(r.elevator),
+      ...(normalizePoints(r) ? polygonFields(r) : {}),
       tanks: (Array.isArray(r.tanks) ? r.tanks : []).map((t, ti) => ({
         id: t.id || uid('t'),
         name: String(t.name ?? `BT ${ti + 1}`),

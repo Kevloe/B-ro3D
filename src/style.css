@@ -356,6 +356,14 @@ a.btn { text-decoration: none; color: inherit; }
 .fwall.draft-op { pointer-events: none; opacity: 0.7; }
 .fw-handle { cursor: move; }
 .handle-rot { cursor: grab; }
+.handle-vertex { cursor: move; }
+.handle-add circle { fill: var(--accent); stroke: #fff; cursor: copy; }
+.handle-add path { stroke: #fff; pointer-events: none; }
+.plan-wrap[data-tool='poly'] svg, .plan-wrap[data-tool='poly'] .room .room-shape { cursor: crosshair; }
+.draft-poly { pointer-events: none; }
+.draft-poly .draft-line { fill: none; stroke: var(--accent); }
+.draft-poly .draft-pt { fill: var(--accent); }
+.draft-poly .draft-start { fill: rgba(226, 0, 26, 0.12); stroke: var(--accent); }
 .rot-guide { stroke: var(--accent); pointer-events: none; }
 .underlay { pointer-events: none; mix-blend-mode: multiply; }
 .plan-wrap[data-tool='underlay'] svg { cursor: move; }

@@ -54,11 +54,16 @@ import {
   wallPoint,
 } from '../data/openings.js';
 import {
+  applyPolygon,
   clampCut,
+  cleanPolygon,
   CUT_CORNERS,
   defaultCut,
+  isValidPolygon,
+  localPolygon,
   normalizeRotation,
   pointInRoom,
+  polygonRoomProps,
   rotatePoint,
   ROOM_SHAPES,
   roomArea,
@@ -101,6 +106,7 @@ export function createEditor(root) {
           <div class="seg">
             <button class="btn sm" data-act="tool-select" data-tool="select" title="Auswählen / Verschieben (V)">Auswählen</button>
             <button class="btn sm" data-act="tool-draw" data-tool="draw" title="Raum aufziehen (R)">Raum zeichnen</button>
+            <button class="btn sm" data-act="tool-poly" data-tool="poly" title="Raum mit beliebigem Umriss Punkt für Punkt zeichnen (F)">Polygon-Raum</button>
             <button class="btn sm" data-act="tool-stairs" data-tool="stairs" title="Treppenhaus aufziehen (S)">Treppenhaus</button>
             <button class="btn sm" data-act="tool-door" data-tool="door" title="Tür auf eine Wand setzen (D)">Tür</button>
             <button class="btn sm" data-act="tool-glass" data-tool="glass" title="Glaswand entlang einer Wand ziehen (G)">Glaswand</button>
@@ -187,6 +193,8 @@ export function createEditor(root) {
   let calib = null; // Maßstab setzen: { a: [x, z], b, hover }
   let draftGlass = null; // Glaswand beim Aufziehen: { x1, z1, x2, z2 }
   let draftWall = null; // freie Wand beim Aufziehen: { x1, z1, x2, z2 }
+  let draftPoly = null; // Polygon-Raum beim Zeichnen: { points: [[x, z], …], hover: [x, z] }
+  let lastVertexClick = { index: -1, time: 0 };
   // 'props' | 'modal': dieses Formular beim nächsten Render nicht neu zeichnen, damit der Fokus bleibt
   let changeSource = null;
   let lastTankClick = { id: null, time: 0 };
@@ -232,14 +240,14 @@ export function createEditor(root) {
 
   /**
    * Punkt für eine freie Wand: fängt Raumecken und Wandenden in der Nähe (10 px), sonst Raster.
-   * Shift = nur waagerecht/senkrecht zum Punkt `from`.
+   * Shift = nur waagerecht/senkrecht zum Punkt `from`. Der Raum `skipRoom` wird nicht gefangen.
    */
-  function snapWallPoint(w, free, from = null, ortho = false) {
+  function snapWallPoint(w, free, from = null, ortho = false, skipRoom = null) {
     let p = [snapValue(w.x, free), snapValue(w.z, free)];
     if (!free) {
       const range = 10 / plan.scale;
       const targets = [
-        ...currentFloor().rooms.flatMap((r) => roomPolygon(r)),
+        ...currentFloor().rooms.filter((r) => r.id !== skipRoom).flatMap((r) => roomPolygon(r)),
         ...floorWalls().flatMap((x) => [[x.x1, x.z1], [x.x2, x.z2]]),
       ];
       let best = range;
@@ -305,6 +313,33 @@ export function createEditor(root) {
     plan.cx = wx - px / plan.scale;
     plan.cz = wz - py / plan.scale;
     renderPlan();
+  }
+
+  /** Bodentanks und Drucker bleiben beim Ändern der Raumgröße oder -form an ihrer Stelle im Gebäude. */
+  function keepItems(r, orig) {
+    const keep = (item, src) => {
+      const [lx, lz] = worldToRoom(r, itemWorld(orig, src));
+      item.x = round2(lx - r.x);
+      item.z = round2(lz - r.z);
+    };
+    r.tanks.forEach((t, i) => keep(t, orig.tanks[i]));
+    r.printers.forEach((p, i) => keep(p, orig.printers[i]));
+    clampItems(r);
+  }
+
+  /** Ecke eines Polygon-Raums entfernen (mindestens drei bleiben). */
+  function removeVertex(index) {
+    const room = selectedRoom();
+    if (!room || room.points.length <= 3) return;
+    const poly = localPolygon(room);
+    poly.splice(index, 1);
+    if (!isValidPolygon(poly)) return;
+    const orig = { ...room, tanks: room.tanks.map((t) => ({ ...t })), printers: room.printers.map((p) => ({ ...p })) };
+    store.mutate((b) => {
+      const r = roomById(b, state.selectedRoomId);
+      applyPolygon(r, poly);
+      keepItems(r, orig);
+    });
   }
 
   /** x/z eines gedrehten Raums so setzen, dass seine linke obere Ecke (ungedreht) bei `corner` liegt. */
@@ -492,14 +527,16 @@ export function createEditor(root) {
         <text class="dim" x="${sel.x + sel.width / 2}" y="${sel.z - 10 * px}" font-size="${11 * px}">${fmt(sel.width, 2)} m</text>
         <text class="dim" x="${sel.x - 10 * px}" y="${sel.z + sel.depth / 2}" font-size="${11 * px}"
           transform="rotate(-90 ${sel.x - 10 * px} ${sel.z + sel.depth / 2})">${fmt(sel.depth, 2)} m</text>`);
-      for (const h of HANDLES) {
-        const [hx, hz] = pts[h];
-        parts.push(
-          `<rect class="handle h-${h}" data-handle="${h}" x="${hx - hs / 2}" y="${hz - hs / 2}"
-            width="${hs}" height="${hs}" stroke-width="${1.5 * px}"/>`,
-        );
-      }
-      if (roomShape(sel) !== 'rect') {
+      if (roomShape(sel) === 'poly') parts.push(renderVertexHandles(sel, px));
+      else
+        for (const h of HANDLES) {
+          const [hx, hz] = pts[h];
+          parts.push(
+            `<rect class="handle h-${h}" data-handle="${h}" x="${hx - hs / 2}" y="${hz - hs / 2}"
+              width="${hs}" height="${hs}" stroke-width="${1.5 * px}"/>`,
+          );
+        }
+      if (roomShape(sel) === 'l' || roomShape(sel) === 'chamfer') {
         const { corner, point } = cutHandle(sel);
         const [cx, cz] = point;
         const guide =
@@ -517,6 +554,8 @@ export function createEditor(root) {
         parts.push(`<text class="dim" x="${rx}" y="${rz - 13 * px}" font-size="${11 * px}">${fmt(roomRotation(sel), 1)}°</text>`);
       parts.push('</g>');
     }
+
+    if (draftPoly) parts.push(renderDraftPoly(px));
 
     if (draftRect) {
       const { x, z, width, depth } = draftRect;
@@ -589,6 +628,67 @@ export function createEditor(root) {
         <path class="op-hit" d="${line}" stroke-width="${14 * px}"/>
         ${handles}
       </g>`;
+  }
+
+  /** Polygon-Raum: Griffe an den Ecken (ziehen, Doppelklick = entfernen) und „+“ auf den Kantenmitten (neue Ecke). */
+  function renderVertexHandles(room, px) {
+    const poly = localPolygon(room);
+    const r = 5 * px;
+    const adds = poly
+      .map((p, i) => {
+        const q = poly[(i + 1) % poly.length];
+        const [mx, mz] = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+        if (Math.hypot(q[0] - p[0], q[1] - p[1]) * plan.scale < 30) return '';
+        return `<g class="handle-add" data-vadd="${i}">
+            <circle cx="${mx}" cy="${mz}" r="${4 * px}" stroke-width="${1.25 * px}"/>
+            <path d="M ${mx - 2 * px} ${mz} H ${mx + 2 * px} M ${mx} ${mz - 2 * px} V ${mz + 2 * px}" stroke-width="${1.25 * px}"/>
+            <title>Ziehen = neue Ecke</title></g>`;
+      })
+      .join('');
+    const corners = poly
+      .map(
+        ([x, z], i) =>
+          `<circle class="handle handle-vertex" data-vertex="${i}" cx="${x}" cy="${z}" r="${r}" stroke-width="${1.5 * px}">
+            <title>Ziehen = Ecke verschieben · Doppelklick = Ecke entfernen</title></circle>`,
+      )
+      .join('');
+    return adds + corners;
+  }
+
+  /** Polygon-Raum beim Zeichnen: Linienzug bis zur Maus, gestrichelte Fläche, Startpunkt zum Schließen. */
+  function renderDraftPoly(px) {
+    const pts = [...draftPoly.points, ...(draftPoly.hover ? [draftPoly.hover] : [])];
+    const [sx, sz] = draftPoly.points[0];
+    const last = draftPoly.points.at(-1);
+    const hover = draftPoly.hover;
+    const seg = hover && Math.hypot(hover[0] - last[0], hover[1] - last[1]);
+    return `
+      <g class="draft-poly">
+        ${pts.length >= 3 ? `<polygon class="draft" points="${pts.join(' ')}" stroke="none"/>` : ''}
+        <polyline class="draft-line" points="${pts.join(' ')}" stroke-width="${2 * px}" stroke-dasharray="${6 * px} ${4 * px}"/>
+        ${draftPoly.points.map(([x, z]) => `<circle class="draft-pt" cx="${x}" cy="${z}" r="${3 * px}"/>`).join('')}
+        <circle class="draft-start" cx="${sx}" cy="${sz}" r="${7 * px}" stroke-width="${1.5 * px}"/>
+        ${
+          seg > 0.05
+            ? `<text class="dim" x="${(hover[0] + last[0]) / 2}" y="${(hover[1] + last[1]) / 2 - 12 * px}" font-size="${11 * px}">${fmt(seg, 2)} m</text>`
+            : ''
+        }
+      </g>`;
+  }
+
+  /** Gezeichneten Umriss als Raum anlegen; überschneidet er sich selbst, wird weitergezeichnet. */
+  function finishPoly() {
+    if (!draftPoly) return;
+    const pts = cleanPolygon(draftPoly.points);
+    if (pts.length < 3) return;
+    if (!isValidPolygon(pts)) {
+      alert('Der Umriss überschneidet sich selbst. Bitte die letzten Punkte mit Rücktaste entfernen und anders zeichnen.');
+      return;
+    }
+    draftPoly = null;
+    state.tool = 'select';
+    addRoom(polygonRoomProps(pts));
+    renderToolbar();
   }
 
   /** Freie Wand: dunkler Balken in Wandstärke, ausgewählt mit Griffen an den Enden. */
@@ -840,6 +940,7 @@ export function createEditor(root) {
       tank: 'Bodentank setzen: in einen Raum klicken · Esc zum Beenden',
       door: 'Tür setzen: auf eine Wand klicken (auch zwischen zwei Räumen) · Alt = ohne Raster · Esc zum Beenden',
       glass: 'Glaswand: an einer Wand entlang ziehen (Klick = 2 m) · Alt = ohne Raster · Esc zum Beenden',
+      poly: 'Polygon-Raum: Ecke für Ecke klicken · auf den Startpunkt klicken, Doppelklick oder Enter = fertig · Rücktaste = letzte Ecke weg · Shift = waagerecht/senkrecht · Alt = ohne Raster · Esc = abbrechen',
       wall: 'Wand: von Punkt zu Punkt ziehen · fängt Raumecken und Wandenden · Shift = waagerecht/senkrecht · Alt = ohne Raster · Esc zum Beenden',
       printer: 'Drucker setzen: in einen Raum oder Flur klicken · Esc zum Beenden',
       calibrate: 'Maßstab setzen: Anfang und Ende einer bekannten Strecke im Hintergrundbild anklicken, dann die echte Länge eingeben · Esc zum Beenden',
@@ -1220,14 +1321,19 @@ export function createEditor(root) {
   /** Raumform: Rechteck, L-Form oder schräge Wand an einer Ecke. */
   function renderShapeFields(room) {
     const shape = roomShape(room);
+    // kurze Beschriftung, damit alle vier Formen in eine Zeile passen
+    const short = { chamfer: 'Schräge' };
     const buttons = Object.entries(ROOM_SHAPES)
       .map(
         ([k, l]) =>
-          `<button class="btn sm${shape === k ? ' active' : ''}" data-act="room-shape" data-shape="${k}">${esc(l)}</button>`,
+          `<button class="btn sm${shape === k ? ' active' : ''}" data-act="room-shape" data-shape="${k}" title="${esc(l)}">${esc(short[k] ?? l)}</button>`,
       )
       .join('');
     const field = `<div class="field"><span>Form</span><div class="seg seg-fill">${buttons}</div></div>`;
     if (shape === 'rect') return field;
+    if (shape === 'poly')
+      return `${field}
+        <span class="hint-text">${room.points.length} Ecken · Ecken im Grundriss ziehen · „+“ auf einer Kante ziehen = neue Ecke · Doppelklick auf eine Ecke = entfernen</span>`;
     const corners = Object.entries(CUT_CORNERS)
       .map(([k, l]) => `<option value="${k}" ${room.cutCorner === k ? 'selected' : ''}>${esc(l)}</option>`)
       .join('');
@@ -1343,6 +1449,7 @@ export function createEditor(root) {
     if (tool !== 'calibrate') calib = null;
     draftGlass = null;
     draftWall = null;
+    draftPoly = null;
     state.tool = tool;
     renderToolbar();
     renderPlan();
@@ -1577,6 +1684,7 @@ export function createEditor(root) {
     'tool-door': () => setTool('door'),
     'tool-glass': () => setTool('glass'),
     'tool-wall': () => setTool('wall'),
+    'tool-poly': () => setTool('poly'),
     'wall-dup': duplicateSelected,
     'wall-del': deleteSelected,
     'room-rotate': (btn) => rotateRoom(roomRotation(selectedRoom()) + Number(btn.dataset.deg)),
@@ -1600,7 +1708,13 @@ export function createEditor(root) {
       const shape = btn.dataset.shape;
       store.mutate((b) => {
         const r = roomById(b, state.selectedRoomId);
-        if (roomShape(r) === 'rect' && shape !== 'rect') Object.assign(r, defaultCut(r));
+        if (shape === 'poly') {
+          // bisherigen Umriss als Ausgangspunkt übernehmen, dann Ecken ziehen
+          if (roomShape(r) !== 'poly') Object.assign(r, polygonRoomProps(localPolygon(r)));
+          return;
+        }
+        if (roomShape(r) === 'poly') delete r.points;
+        if ((roomShape(r) === 'rect' || roomShape(r) === 'poly') && shape !== 'rect') Object.assign(r, defaultCut(r));
         r.shape = shape;
         clampCut(r);
         clampItems(r);
@@ -1846,6 +1960,12 @@ export function createEditor(root) {
       }
       const corner = scope === 'room' && (key === 'width' || key === 'depth') && roomToWorld(target, [target.x, target.z]);
       target[key] = value;
+      if (corner && roomShape(target) === 'poly') {
+        // Umriss mit dem umschließenden Rechteck strecken
+        const k = key === 'width' ? 0 : 1;
+        const old = Math.max(...target.points.map((p) => p[k])) || 1;
+        target.points = target.points.map((p) => p.map((v, i) => (i === k ? round3((v * value) / old) : v)));
+      }
       if (corner && roomRotation(target)) placeCorner(target, corner);
       const room = roomById(b, state.selectedRoomId);
       if (scope === 'room' && ['width', 'depth', 'cutW', 'cutD'].includes(key)) clampCut(room);
@@ -1914,6 +2034,21 @@ export function createEditor(root) {
       addDoor(w, e.altKey);
       return;
     }
+    if (state.tool === 'poly') {
+      const from = draftPoly?.points.at(-1);
+      const p = snapWallPoint(w, e.altKey, from, e.shiftKey);
+      if (!draftPoly) draftPoly = { points: [p], hover: p };
+      else {
+        const [sx, sz] = draftPoly.points[0];
+        // Klick auf den Startpunkt oder Doppelklick (zweimal derselbe Punkt) schließt den Umriss
+        const closes = Math.hypot(w.x - sx, w.z - sz) * plan.scale < 10 && draftPoly.points.length >= 3;
+        const repeat = Math.hypot(p[0] - from[0], p[1] - from[1]) < 1e-6;
+        if (closes || (repeat && draftPoly.points.length >= 3)) return finishPoly();
+        if (!repeat) draftPoly.points.push(p);
+      }
+      renderPlan();
+      return;
+    }
     if (state.tool === 'wall') {
       const [x, z] = snapWallPoint(w, e.altKey);
       drag = { type: 'wall-draw', start: [x, z] };
@@ -1976,6 +2111,28 @@ export function createEditor(root) {
       drag = { type: 'tank', start: w, orig: { x: t.x, z: t.z }, started: false };
       return;
     }
+    const vertexEl = e.target.closest('[data-vertex]');
+    const vaddEl = e.target.closest('[data-vadd]');
+    if ((vertexEl || vaddEl) && selectedRoom()) {
+      const r = selectedRoom();
+      const orig = {
+        ...r,
+        points: r.points.map((p) => [...p]),
+        tanks: r.tanks.map((t) => ({ x: t.x, z: t.z })),
+        printers: r.printers.map((p) => ({ x: p.x, z: p.z })),
+      };
+      if (vertexEl) {
+        const index = Number(vertexEl.dataset.vertex);
+        const now = performance.now();
+        const isDouble = lastVertexClick.index === index && now - lastVertexClick.time < 400;
+        lastVertexClick = { index, time: now };
+        if (isDouble) return removeVertex(index);
+        drag = { type: 'vertex', index, insert: false, start: w, orig, started: false };
+      } else {
+        drag = { type: 'vertex', index: Number(vaddEl.dataset.vadd) + 1, insert: true, start: w, orig, started: false };
+      }
+      return;
+    }
     if (handleEl && selectedRoom() && handleEl.dataset.handle === 'rotate') {
       const r = selectedRoom();
       drag = {
@@ -2026,6 +2183,10 @@ export function createEditor(root) {
     $('#e-coords').textContent = `x ${fmt(w.x, 2)} · z ${fmt(w.z, 2)} m`;
     if (calib && !calib.b) {
       calib.hover = [w.x, w.z];
+      renderPlan();
+    }
+    if (draftPoly) {
+      draftPoly.hover = snapWallPoint(w, e.altKey, draftPoly.points.at(-1), e.shiftKey);
       renderPlan();
     }
     if (!drag) return;
@@ -2145,6 +2306,21 @@ export function createEditor(root) {
           }
           return;
         }
+        if (drag.type === 'vertex') {
+          const o = drag.orig;
+          // im ungedrehten Rahmen des Raums vor dem Ziehen rechnen; ohne Drehung Raster und Fangen wie bei Wänden
+          const p = roomRotation(o)
+            ? worldToRoom(o, [w.x, w.z]).map((v) => snapValue(v, free))
+            : snapWallPoint(w, free, null, false, o.id);
+          const poly = localPolygon(o);
+          if (drag.insert) poly.splice(drag.index, 0, p);
+          else poly[drag.index] = p;
+          if (!isValidPolygon(poly)) return;
+          Object.assign(r, { x: o.x, z: o.z, width: o.width, depth: o.depth });
+          applyPolygon(r, poly);
+          keepItems(r, o);
+          return;
+        }
         if (drag.type === 'rotate') {
           // Griff sitzt über der oberen Kante: Winkel 0 = Griff genau nach oben
           const [cx, cz] = roomCenter(r);
@@ -2187,15 +2363,7 @@ export function createEditor(root) {
         r.x = round3(cx - r.width / 2);
         r.z = round3(cz - r.depth / 2);
         clampCut(r);
-        // Bodentanks und Drucker bleiben beim Ändern der Raumgröße an ihrer Stelle im Gebäude
-        const keep = (item, src) => {
-          const [lx, lz] = worldToRoom(r, itemWorld(o, src));
-          item.x = round2(lx - r.x);
-          item.z = round2(lz - r.z);
-        };
-        r.tanks.forEach((t, i) => keep(t, o.tanks[i]));
-        r.printers.forEach((p, i) => keep(p, o.printers[i]));
-        clampItems(r);
+        keepItems(r, o);
       },
       { checkpoint: false },
     );
@@ -2267,6 +2435,13 @@ export function createEditor(root) {
     if (e.target.closest?.('input, textarea, select')) return;
     const ctrl = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
+    if (draftPoly && (key === 'enter' || key === 'backspace')) {
+      e.preventDefault();
+      if (key === 'enter') return finishPoly();
+      draftPoly.points.pop();
+      if (!draftPoly.points.length) draftPoly = null;
+      return renderPlan();
+    }
     if (ctrl && key === 'z' && !e.shiftKey) store.undo();
     else if (ctrl && (key === 'y' || (key === 'z' && e.shiftKey))) store.redo();
     else if (ctrl && key === 'd') duplicateSelected();
@@ -2276,6 +2451,7 @@ export function createEditor(root) {
       draftRect = null;
       draftGlass = null;
       draftWall = null;
+      draftPoly = null;
       calib = null;
       drag = null;
       setTool('select');
@@ -2290,6 +2466,7 @@ export function createEditor(root) {
     else if (key === 'd' && !ctrl) setTool('door');
     else if (key === 'g' && !ctrl) setTool('glass');
     else if (key === 'w' && !ctrl) setTool('wall');
+    else if (key === 'f' && !ctrl) setTool('poly');
     else if (key === 'v' && !ctrl) setTool('select');
     else if (key.startsWith('arrow') && (state.selectedRoomId || state.selectedWallId)) {
       const base = state.selectedTankId || state.selectedPrinterId ? TANK_SNAP : state.snap;
