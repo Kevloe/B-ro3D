@@ -346,7 +346,17 @@ a.btn { text-decoration: none; color: inherit; }
 .opening.draft-op { pointer-events: none; }
 .op-handle { cursor: ew-resize; }
 .plan-wrap[data-tool='door'] svg, .plan-wrap[data-tool='door'] .room .room-shape,
-.plan-wrap[data-tool='glass'] svg, .plan-wrap[data-tool='glass'] .room .room-shape { cursor: crosshair; }
+.plan-wrap[data-tool='glass'] svg, .plan-wrap[data-tool='glass'] .room .room-shape,
+.plan-wrap[data-tool='wall'] svg, .plan-wrap[data-tool='wall'] .room .room-shape,
+.plan-wrap[data-tool='wall'] .fwall .fw-hit { cursor: crosshair; }
+.fwall path { fill: none; }
+.fwall .fw-body { stroke: #3b4352; stroke-linecap: square; }
+.fwall .fw-hit { stroke: transparent; cursor: move; pointer-events: stroke; }
+.fwall.selected .fw-body { stroke: var(--accent); }
+.fwall.draft-op { pointer-events: none; opacity: 0.7; }
+.fw-handle { cursor: move; }
+.handle-rot { cursor: grab; }
+.rot-guide { stroke: var(--accent); pointer-events: none; }
 .underlay { pointer-events: none; mix-blend-mode: multiply; }
 .plan-wrap[data-tool='underlay'] svg { cursor: move; }
 .plan-wrap[data-tool='calibrate'] svg,

@@ -73,20 +73,50 @@ function subtract(intervals, cuts) {
 /**
  * Computes wall segments for all rooms of a floor.
  * - Each room gets walls inset on its own side, so neighbouring rooms never overlap.
- * - Corridors have no wall where they touch other rooms (the room wall is used).
- * - Rooms touching a corridor get a door opening (with lintel) in the middle of the shared edge.
- * - Edges may run at any angle (slanted walls); corners are mitred.
- * - `openings` (doors and glass walls drawn in the editor) cut the walls they lie on. A door on an
- *   edge shared with a corridor replaces the automatic door there.
+ * - Corridors have no wall where they touch other rooms (the room wall is used). Doors are never
+ *   added automatically – only the ones drawn in the editor.
+ * - Edges may run at any angle (slanted walls, rotated rooms); corners are mitred.
+ * - `openings` (doors and glass walls drawn in the editor) cut the walls they lie on. A door inside a
+ *   glass wall gets glass above it instead of a lintel.
+ * - `freeWalls` are free-standing walls centred on their line, cut by openings like room walls.
  *
- * Returns segments `{ quad: [[x, z] × 4], len, kind: 'wall' | 'lintel' | 'glass' }` – `quad` is the
- * footprint (outer edge, then inner edge backwards); for glass the thin pane.
+ * Returns segments `{ quad: [[x, z] × 4], len, kind: 'wall' | 'lintel' | 'glass' | 'transom' }` – `quad`
+ * is the footprint (outer edge, then inner edge backwards); for glass and transoms the thin pane.
  */
-export function computeWalls(rooms, doorWidth = 1, openings = []) {
+export function computeWalls(rooms, openings = [], freeWalls = []) {
   const out = [];
   const isCorridor = (r) => r.type === 'corridor';
   const all = rooms.map((room) => ({ room, edges: edgesOf(roomPolygon(room)) }));
   const T = WALL_THICKNESS;
+  const G = GLASS_THICKNESS;
+
+  /** Wand, Stürze, Glas und Oberlichter einer Kante; `quad` und `pane` liefern die Grundflächen. */
+  function emit(edge, own, quad, pane, base = [[0, edge.len]]) {
+    const doors = own.filter((x) => x.type === 'door').map((x) => x.range);
+    const glassAll = own.filter((x) => x.type === 'glass').map((x) => x.range);
+    // Tür in einer Glaswand: darüber Glas statt Sturz, die Scheibe daneben endet an der Tür
+    const inGlass = (d) => glassAll.some((g) => intersects(g, d[0], d[1]));
+    const lintels = doors.filter((d) => !inGlass(d));
+    const transoms = doors.filter(inGlass);
+    const glass = subtract(glassAll, doors);
+    for (const s of subtract(base, [...doors, ...glassAll]))
+      out.push({ quad: quad(s), len: s[1] - s[0], kind: 'wall' });
+    for (const s of lintels) out.push({ quad: quad(s), len: s[1] - s[0], kind: 'lintel' });
+    for (const s of glass) {
+      const q = pane(s);
+      if (q) out.push({ quad: q, len: s[1] - s[0], kind: 'glass' });
+    }
+    for (const s of transoms) {
+      const q = pane(s);
+      if (q) out.push({ quad: q, len: s[1] - s[0], kind: 'transom' });
+    }
+  }
+
+  const at = (edge, t) => [edge.p[0] + edge.u[0] * t, edge.p[1] + edge.u[1] * t];
+  const off = (edge, t, d) => {
+    const [x, z] = at(edge, t);
+    return [x + edge.n[0] * d, z + edge.n[1] * d];
+  };
 
   for (const { room, edges } of all) {
     // Innenecken: Schnittpunkt der um T nach innen versetzten Nachbarkanten (Gehrung)
@@ -106,52 +136,41 @@ export function computeWalls(rooms, doorWidth = 1, openings = []) {
         }
       }
 
-      const shared = overlaps.map((o) => [o.a, o.b]);
-      let segments = [[0, edge.len]];
       let own = openings.map((o) => ({ type: o.type, range: openingRange(edge, o) })).filter((x) => x.range);
+      let full = [[0, edge.len]];
       // Am Flur übernimmt der Raum die Wand – samt Tür oder Glas
       if (isCorridor(room)) {
-        segments = subtract(segments, shared);
+        const shared = overlaps.map((o) => [o.a, o.b]);
+        full = subtract(full, shared);
         own = own.flatMap((x) => subtract([x.range], shared).map((range) => ({ type: x.type, range })));
       }
-      const doors = own.filter((x) => x.type === 'door').map((x) => x.range);
-      const glass = own.filter((x) => x.type === 'glass').map((x) => x.range);
-      const autoDoors = isCorridor(room)
-        ? []
-        : overlaps
-            .filter((o) => o.corridor && o.b - o.a >= doorWidth + 0.3 && !doors.some((d) => intersects(d, o.a, o.b)))
-            .map((o) => {
-              const mid = (o.a + o.b) / 2;
-              return [mid - doorWidth / 2, mid + doorWidth / 2];
-            });
-      const lintels = [...autoDoors, ...doors];
-      segments = subtract(segments, [...lintels, ...glass]);
 
-      const at = (t) => [edge.p[0] + edge.u[0] * t, edge.p[1] + edge.u[1] * t];
       const innerAt = (t) => {
         if (t < EPS) return inner[i];
         if (t > edge.len - EPS) return inner[(i + 1) % edges.length];
-        const [x, z] = at(t);
-        return [x + edge.n[0] * T, z + edge.n[1] * T];
+        return off(edge, t, T);
       };
-      const quad = ([a, b]) => [at(a), at(b), innerAt(b), innerAt(a)];
-      for (const s of segments) out.push({ quad: quad(s), len: s[1] - s[0], kind: 'wall' });
-      for (const s of lintels) out.push({ quad: quad(s), len: s[1] - s[0], kind: 'lintel' });
-
+      const quad = ([a, b]) => [at(edge, a), at(edge, b), innerAt(b), innerAt(a)];
       // Glas: zwischen zwei Räumen eine Scheibe genau auf der Grenze (nur einer der beiden zeichnet sie),
       // sonst mittig in der eigenen Wand
-      const G = GLASS_THICKNESS;
-      for (const [a, b] of glass) {
+      const pane = ([a, b]) => {
         const neighbour = overlaps.find((o) => !o.corridor && intersects([a, b], o.a, o.b));
-        if (neighbour && neighbour.id < room.id) continue;
+        if (neighbour && neighbour.id < room.id) return null;
         const [o1, o2] = neighbour ? [-G / 2, G / 2] : [T / 2 - G / 2, T / 2 + G / 2];
-        const off = (t, d) => {
-          const [x, z] = at(t);
-          return [x + edge.n[0] * d, z + edge.n[1] * d];
-        };
-        out.push({ quad: [off(a, o1), off(b, o1), off(b, o2), off(a, o2)], len: b - a, kind: 'glass' });
-      }
+        return [off(edge, a, o1), off(edge, b, o1), off(edge, b, o2), off(edge, a, o2)];
+      };
+      emit(edge, own, quad, pane, full);
     });
+  }
+
+  for (const w of freeWalls) {
+    const [edge] = edgesOf([
+      [w.x1, w.z1],
+      [w.x2, w.z2],
+    ]);
+    const own = openings.map((o) => ({ type: o.type, range: openingRange(edge, o) })).filter((x) => x.range);
+    const band = (d1, d2) => ([a, b]) => [off(edge, a, d1), off(edge, b, d1), off(edge, b, d2), off(edge, a, d2)];
+    emit(edge, own, band(-T / 2, T / 2), band(-G / 2, G / 2));
   }
   return out;
 }

@@ -94,6 +94,19 @@ export function createSampleBuilding() {
     }
   }
 
+  // Türen zum Flur: je Raum mittig in der Wand zum Flur (Türen werden nicht mehr automatisch gesetzt)
+  const doorW = 1;
+  building.floors[0].openings = building.floors[0].rooms
+    .filter((r) => r.type !== 'corridor')
+    .map((r) => {
+      const mid = r.x + r.width / 2;
+      const z = r.z === north ? corridorZ : south;
+      return {
+        id: `o-${r.id.slice(2)}`, type: 'door', swing: r.z === north ? 2 : 0, // schlägt in den Raum auf
+        x1: mid - doorW / 2, z1: z, x2: mid + doorW / 2, z2: z,
+      };
+    });
+
   // Drucker: einer im Flur, einer in Büro 102
   const rooms = Object.fromEntries(building.floors[0].rooms.map((r) => [r.id, r]));
   for (const r of building.floors[0].rooms) r.printers = [];

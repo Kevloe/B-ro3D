@@ -10,6 +10,7 @@ import {
   floorBounds,
   groundIndex,
   isValidIp,
+  itemWorld,
   nextPrinterName,
   nextTankName,
   PRINTER_D,
@@ -36,9 +37,11 @@ import {
   stairLayout,
 } from '../data/stairs.js';
 import { WALL_THICKNESS } from '../three/walls.js';
+import { createWall, MIN_WALL, wallLength } from '../data/freeWalls.js';
 import {
   createOpening,
   DOOR_WIDTH,
+  isOnFreeWall,
   isOnRoom,
   isOnWall,
   MIN_OPENING,
@@ -54,13 +57,20 @@ import {
   clampCut,
   CUT_CORNERS,
   defaultCut,
+  normalizeRotation,
   pointInRoom,
+  rotatePoint,
   ROOM_SHAPES,
   roomArea,
+  roomCenter,
   roomLabelPoint,
   roomPolygon,
+  roomRotation,
   roomShape,
   roomsOverlap,
+  roomToWorld,
+  vectorToRoom,
+  worldToRoom,
 } from '../data/shape.js';
 import { BuildingView } from '../three/BuildingView.js';
 import { clamp, esc, fmt } from '../utils.js';
@@ -94,6 +104,7 @@ export function createEditor(root) {
             <button class="btn sm" data-act="tool-stairs" data-tool="stairs" title="Treppenhaus aufziehen (S)">Treppenhaus</button>
             <button class="btn sm" data-act="tool-door" data-tool="door" title="Tür auf eine Wand setzen (D)">Tür</button>
             <button class="btn sm" data-act="tool-glass" data-tool="glass" title="Glaswand entlang einer Wand ziehen (G)">Glaswand</button>
+            <button class="btn sm" data-act="tool-wall" data-tool="wall" title="Freie Wand ziehen (W)">Wand</button>
             <button class="btn sm" data-act="tool-tank" data-tool="tank" title="Bodentank in einen Raum setzen (T)">Bodentank setzen</button>
             <button class="btn sm" data-act="tool-printer" data-tool="printer" title="Drucker in einen Raum oder Flur setzen (P)">Drucker setzen</button>
           </div>
@@ -165,6 +176,7 @@ export function createEditor(root) {
     selectedTankId: null,
     selectedPrinterId: null,
     selectedOpeningId: null,
+    selectedWallId: null,
     tool: 'select',
     snap: 0.5,
     tankModal: false,
@@ -174,6 +186,7 @@ export function createEditor(root) {
   let draftRect = null;
   let calib = null; // Maßstab setzen: { a: [x, z], b, hover }
   let draftGlass = null; // Glaswand beim Aufziehen: { x1, z1, x2, z2 }
+  let draftWall = null; // freie Wand beim Aufziehen: { x1, z1, x2, z2 }
   // 'props' | 'modal': dieses Formular beim nächsten Render nicht neu zeichnen, damit der Fokus bleibt
   let changeSource = null;
   let lastTankClick = { id: null, time: 0 };
@@ -208,10 +221,42 @@ export function createEditor(root) {
   const selectedOpening = () => floorOpenings().find((o) => o.id === state.selectedOpeningId) ?? null;
   const openingById = (b) =>
     b.floors.find((f) => f.id === state.floorId)?.openings?.find((o) => o.id === state.selectedOpeningId);
+  const floorWalls = () => currentFloor()?.walls ?? [];
+  const selectedWall = () => floorWalls().find((w) => w.id === state.selectedWallId) ?? null;
+  const wallById = (b) => b.floors.find((f) => f.id === state.floorId)?.walls?.find((w) => w.id === state.selectedWallId);
   /** Fangbereich für Wände: 14 px, mindestens 0,25 m. */
-  const wallAt = (w) => nearestWall(currentFloor().rooms, [w.x, w.z], Math.max(0.25, 14 / plan.scale));
+  const wallAt = (w) =>
+    nearestWall(currentFloor().rooms, [w.x, w.z], Math.max(0.25, 14 / plan.scale), floorWalls());
   const snapValue = (v, free, step = state.snap) => (free ? Math.round(v * 100) / 100 : Math.round(v / step) * step);
   const round2 = (v) => Math.round(v * 100) / 100;
+
+  /**
+   * Punkt für eine freie Wand: fängt Raumecken und Wandenden in der Nähe (10 px), sonst Raster.
+   * Shift = nur waagerecht/senkrecht zum Punkt `from`.
+   */
+  function snapWallPoint(w, free, from = null, ortho = false) {
+    let p = [snapValue(w.x, free), snapValue(w.z, free)];
+    if (!free) {
+      const range = 10 / plan.scale;
+      const targets = [
+        ...currentFloor().rooms.flatMap((r) => roomPolygon(r)),
+        ...floorWalls().flatMap((x) => [[x.x1, x.z1], [x.x2, x.z2]]),
+      ];
+      let best = range;
+      for (const t of targets) {
+        const d = Math.hypot(t[0] - w.x, t[1] - w.z);
+        if (d < best) {
+          best = d;
+          p = [round3(t[0]), round3(t[1])];
+        }
+      }
+    }
+    if (from && ortho) {
+      if (Math.abs(p[0] - from[0]) >= Math.abs(p[1] - from[1])) p[1] = from[1];
+      else p[0] = from[0];
+    }
+    return p;
+  }
 
   function toWorld(e) {
     const r = svg.getBoundingClientRect();
@@ -262,7 +307,22 @@ export function createEditor(root) {
     renderPlan();
   }
 
-  /** Ecke mit der Aussparung und der innere Punkt der Aussparung (Griff zum Ändern der Größe). */
+  /** x/z eines gedrehten Raums so setzen, dass seine linke obere Ecke (ungedreht) bei `corner` liegt. */
+  function placeCorner(r, corner) {
+    const [ox, oz] = rotatePoint([-r.width / 2, -r.depth / 2], [0, 0], roomRotation(r));
+    r.x = round3(corner[0] - ox - r.width / 2);
+    r.z = round3(corner[1] - oz - r.depth / 2);
+  }
+
+  /** SVG-Drehung eines Raums um seine Mitte (leer ohne Drehung). */
+  const rotateAttr = (r) => {
+    const a = roomRotation(r);
+    if (!a) return '';
+    const [cx, cz] = roomCenter(r);
+    return `transform="rotate(${a} ${cx} ${cz})"`;
+  };
+
+  /** Ecke mit der Aussparung und der innere Punkt der Aussparung (Griff zum Ändern der Größe), ungedreht. */
   function cutHandle(r) {
     const east = r.cutCorner === 'ne' || r.cutCorner === 'se';
     const north = r.cutCorner === 'nw' || r.cutCorner === 'ne';
@@ -335,14 +395,19 @@ export function createEditor(root) {
       const showText = r.width * s > 44 && r.depth * s > 26;
       // Rechteck: Name oben (Treppensymbol bleibt frei), sonst in der Mitte des größten Teils
       const [tx, tz] =
-        roomShape(r) === 'rect' ? [r.x + r.width / 2, r.z + 16 * px] : roomLabelPoint(r).map((v, i) => v - (i ? 7 * px : 0));
+        roomShape(r) === 'rect'
+          ? roomToWorld(r, [r.x + r.width / 2, r.z + (roomRotation(r) ? r.depth / 2 - 7 * px : 16 * px)])
+          : roomLabelPoint(r).map((v, i) => v - (i ? 7 * px : 0));
       parts.push(`
         <g class="room${sel ? ' selected' : ''}${overlaps.has(r.id) ? ' overlap' : ''}" data-room="${r.id}">
           <polygon class="room-shape" points="${roomPolygon(r).join(' ')}"
             fill="${roomColor(r)}" fill-opacity="${r.type === 'corridor' ? 0.35 : 0.55}"
             stroke-width="${(sel ? 2.5 : 1.25) * px}" stroke-linejoin="round"/>
-          ${r.type === 'stairs' && hasFloorAbove ? renderStairs(r, floor.height, px) : ''}
-          ${r.type === 'stairs' ? renderElevator(r, floor.height, px) : ''}
+          ${
+            r.type === 'stairs'
+              ? `<g ${rotateAttr(r)}>${hasFloorAbove ? renderStairs(r, floor.height, px) : ''}${renderElevator(r, floor.height, px)}</g>`
+              : ''
+          }
           ${
             showText
               ? `<text x="${tx}" y="${tz}" font-size="${13 * px}" class="room-name">${esc(r.name)}</text>
@@ -352,7 +417,12 @@ export function createEditor(root) {
         </g>`);
     }
 
-    for (const o of floorOpenings()) parts.push(renderOpening(o, floor, px));
+    for (const w of floorWalls()) parts.push(renderFreeWall(w, px));
+    if (draftWall) parts.push(renderFreeWall({ ...draftWall, id: '' }, px, true));
+
+    // Glas zuerst, damit Türen in einer Glaswand darüber liegen und greifbar bleiben
+    const openingsInOrder = [...floorOpenings()].sort((a, b) => (a.type === 'glass' ? 0 : 1) - (b.type === 'glass' ? 0 : 1));
+    for (const o of openingsInOrder) parts.push(renderOpening(o, floor, px));
     if (draftGlass) parts.push(renderOpening({ ...draftGlass, id: '', type: 'glass' }, floor, px, true));
 
     // Bodentanks (mindestens 12 px groß, damit sie greifbar bleiben)
@@ -360,14 +430,14 @@ export function createEditor(root) {
     const showTankText = s > 18;
     for (const r of floor.rooms) {
       for (const t of r.tanks) {
-        const tx = r.x + t.x;
-        const tz = r.z + t.z;
+        const [tx, tz] = itemWorld(r, t);
         const sel = t.id === state.selectedTankId;
+        const rot = roomRotation(r) ? `transform="rotate(${roomRotation(r)} ${tx} ${tz})"` : '';
         parts.push(`
           <g class="tank${sel ? ' selected' : ''}" data-tank="${t.id}" data-tank-room="${r.id}">
             <rect x="${tx - ts / 2}" y="${tz - ts / 2}" width="${ts}" height="${ts}" rx="${2 * px}"
-              stroke-width="${(sel ? 2 : 1.25) * px}"/>
-            <path d="M ${tx - ts / 4} ${tz} H ${tx + ts / 4} M ${tx} ${tz - ts / 4} V ${tz + ts / 4}" stroke-width="${1.25 * px}"/>
+              stroke-width="${(sel ? 2 : 1.25) * px}" ${rot}/>
+            <path d="M ${tx - ts / 4} ${tz} H ${tx + ts / 4} M ${tx} ${tz - ts / 4} V ${tz + ts / 4}" stroke-width="${1.25 * px}" ${rot}/>
             ${
               showTankText
                 ? `<text x="${tx}" y="${tz + ts / 2 + 9 * px}" font-size="${10 * px}">${esc(t.name)} · ${t.ports.length}</text>`
@@ -382,14 +452,14 @@ export function createEditor(root) {
     const pd = Math.max(PRINTER_D, 13 * px);
     for (const r of floor.rooms) {
       for (const p of r.printers) {
-        const cx = r.x + p.x;
-        const cz = r.z + p.z;
+        const [cx, cz] = itemWorld(r, p);
         const sel = p.id === state.selectedPrinterId;
+        const rot = roomRotation(r) ? `transform="rotate(${roomRotation(r)} ${cx} ${cz})"` : '';
         parts.push(`
           <g class="printer${sel ? ' selected' : ''}" data-printer="${p.id}" data-printer-room="${r.id}">
             <rect x="${cx - pw / 2}" y="${cz - pd / 2}" width="${pw}" height="${pd}" rx="${3 * px}"
-              stroke-width="${(sel ? 2 : 1.25) * px}"/>
-            <rect class="paper" x="${cx - pw * 0.28}" y="${cz - pd * 0.18}" width="${pw * 0.56}" height="${pd * 0.36}"/>
+              stroke-width="${(sel ? 2 : 1.25) * px}" ${rot}/>
+            <rect class="paper" x="${cx - pw * 0.28}" y="${cz - pd * 0.18}" width="${pw * 0.56}" height="${pd * 0.36}" ${rot}/>
             ${
               showTankText
                 ? `<text x="${cx}" y="${cz + pd / 2 + 9 * px}" font-size="${10 * px}">${esc(p.name)}</text>`
@@ -412,7 +482,13 @@ export function createEditor(root) {
         sw: [sel.x, sel.z + sel.depth],
         w: [sel.x, sel.z + sel.depth / 2],
       };
-      parts.push(`
+      // Drehgriff über der Mitte der oberen Kante
+      const rx = sel.x + sel.width / 2;
+      const rz = sel.z - 26 * px;
+      parts.push(`<g ${rotateAttr(sel)}>
+        <path class="rot-guide" d="M ${rx} ${sel.z} V ${rz}" stroke-width="${px}"/>
+        <circle class="handle handle-rot" data-handle="rotate" cx="${rx}" cy="${rz}" r="${5.5 * px}" stroke-width="${1.5 * px}">
+          <title>Drehen (Raster 15°, Alt = frei)</title></circle>
         <text class="dim" x="${sel.x + sel.width / 2}" y="${sel.z - 10 * px}" font-size="${11 * px}">${fmt(sel.width, 2)} m</text>
         <text class="dim" x="${sel.x - 10 * px}" y="${sel.z + sel.depth / 2}" font-size="${11 * px}"
           transform="rotate(-90 ${sel.x - 10 * px} ${sel.z + sel.depth / 2})">${fmt(sel.depth, 2)} m</text>`);
@@ -437,6 +513,9 @@ export function createEditor(root) {
             d="M ${cx} ${cz - hs * 0.75} L ${cx + hs * 0.75} ${cz} L ${cx} ${cz + hs * 0.75} L ${cx - hs * 0.75} ${cz} Z"
             stroke-width="${1.5 * px}"/>`);
       }
+      if (roomRotation(sel))
+        parts.push(`<text class="dim" x="${rx}" y="${rz - 13 * px}" font-size="${11 * px}">${fmt(roomRotation(sel), 1)}°</text>`);
+      parts.push('</g>');
     }
 
     if (draftRect) {
@@ -472,7 +551,7 @@ export function createEditor(root) {
    */
   function renderOpening(o, floor, px, draft = false) {
     const sel = o.id && o.id === state.selectedOpeningId;
-    const detached = !draft && !isOnWall(o, floor.rooms);
+    const detached = !draft && !isOnWall(o, floor);
     const line = `M ${o.x1} ${o.z1} L ${o.x2} ${o.z2}`;
     let symbol;
     if (o.type === 'door') {
@@ -512,6 +591,58 @@ export function createEditor(root) {
       </g>`;
   }
 
+  /** Freie Wand: dunkler Balken in Wandstärke, ausgewählt mit Griffen an den Enden. */
+  function renderFreeWall(w, px, draft = false) {
+    const sel = w.id && w.id === state.selectedWallId;
+    const line = `M ${w.x1} ${w.z1} L ${w.x2} ${w.z2}`;
+    const handles = sel
+      ? [['a', w.x1, w.z1], ['b', w.x2, w.z2]]
+          .map(
+            ([k, x, z]) =>
+              `<circle class="handle fw-handle" data-whandle="${k}" cx="${x}" cy="${z}" r="${4.5 * px}" stroke-width="${1.5 * px}"/>`,
+          )
+          .join('')
+      : '';
+    const len = wallLength(w);
+    const label =
+      sel || draft
+        ? `<text class="dim" x="${(w.x1 + w.x2) / 2}" y="${(w.z1 + w.z2) / 2 - 12 * px}" font-size="${11 * px}">${fmt(len, 2)} m</text>`
+        : '';
+    return `
+      <g class="fwall${sel ? ' selected' : ''}${draft ? ' draft-op' : ''}" ${w.id ? `data-wall="${w.id}"` : ''}>
+        <path class="fw-body" d="${line}" stroke-width="${Math.max(WALL_THICKNESS, 3 * px)}"/>
+        <path class="fw-hit" d="${line}" stroke-width="${14 * px}"/>
+        ${handles}
+        ${label}
+      </g>`;
+  }
+
+  function addWall(props) {
+    const w = createWall(props);
+    store.mutate((b) => {
+      const f = b.floors.find((x) => x.id === state.floorId);
+      (f.walls ??= []).push(w);
+    });
+    selectWall(w.id);
+  }
+
+  function selectWall(id) {
+    state.selectedWallId = id;
+    state.selectedOpeningId = null;
+    state.selectedRoomId = null;
+    state.selectedTankId = null;
+    state.selectedPrinterId = null;
+    preview.setSelectedRoom(null);
+    preview.setSelectedTank(null);
+    preview.setSelectedPrinter(null);
+    renderPlan();
+    renderProps();
+    renderRoomList();
+  }
+
+  /** Türen und Glaswände auf einer freien Wand – sie wandern beim Verschieben mit. */
+  const wallOpenings = (floor, wall) => (floor.openings ?? []).filter((o) => isOnFreeWall(o, wall));
+
   /** Neue Tür mittig an der angeklickten Stelle der nächsten Wand. */
   function addDoor(w, free) {
     const wall = wallAt(w);
@@ -535,6 +666,7 @@ export function createEditor(root) {
 
   function selectOpening(id) {
     state.selectedOpeningId = id;
+    state.selectedWallId = null;
     state.selectedRoomId = null;
     state.selectedTankId = null;
     state.selectedPrinterId = null;
@@ -546,8 +678,19 @@ export function createEditor(root) {
     renderRoomList();
   }
 
-  /** Türen und Glaswände auf dem Umriss eines Raums – sie wandern beim Verschieben mit. */
+  /** Türen und Glaswände auf dem Umriss eines Raums – sie wandern beim Verschieben und Drehen mit. */
   const attachedOpenings = (floor, room) => (floor.openings ?? []).filter((o) => isOnRoom(o, room));
+
+  /** Öffnungen (Kopien von vorher) um `center` drehen und in die Etage übernehmen. */
+  function rotateOpenings(floor, originals, center, deg) {
+    for (const src of originals) {
+      const o = floor.openings?.find((x) => x.id === src.id);
+      if (!o) continue;
+      const [x1, z1] = rotatePoint([src.x1, src.z1], center, deg);
+      const [x2, z2] = rotatePoint([src.x2, src.z2], center, deg);
+      Object.assign(o, { x1: round3(x1), z1: round3(z1), x2: round3(x2), z2: round3(z2) });
+    }
+  }
 
   /** Hintergrundbild der Etage: nur Attribute setzen, das Bild selbst nur bei Wechsel. */
   function renderUnderlay(floor) {
@@ -697,11 +840,12 @@ export function createEditor(root) {
       tank: 'Bodentank setzen: in einen Raum klicken · Esc zum Beenden',
       door: 'Tür setzen: auf eine Wand klicken (auch zwischen zwei Räumen) · Alt = ohne Raster · Esc zum Beenden',
       glass: 'Glaswand: an einer Wand entlang ziehen (Klick = 2 m) · Alt = ohne Raster · Esc zum Beenden',
+      wall: 'Wand: von Punkt zu Punkt ziehen · fängt Raumecken und Wandenden · Shift = waagerecht/senkrecht · Alt = ohne Raster · Esc zum Beenden',
       printer: 'Drucker setzen: in einen Raum oder Flur klicken · Esc zum Beenden',
       calibrate: 'Maßstab setzen: Anfang und Ende einer bekannten Strecke im Hintergrundbild anklicken, dann die echte Länge eingeben · Esc zum Beenden',
       underlay: 'Hintergrundbild verschieben: im Grundriss ziehen · Esc zum Beenden',
       select:
-        'Klicken = auswählen · Ziehen = verschieben · Griffe = Größe ändern · Raute = Aussparung/Schräge · Doppelklick auf Bodentank = Ports bearbeiten · P = Drucker setzen · Alt = ohne Raster',
+        'Klicken = auswählen · Ziehen = verschieben · Griffe = Größe ändern · Kreis = drehen · Raute = Aussparung/Schräge · Doppelklick auf Bodentank = Ports bearbeiten · P = Drucker setzen · Alt = ohne Raster',
     }[state.tool];
   }
 
@@ -743,12 +887,27 @@ export function createEditor(root) {
         </label>
         ${o.type === 'door' ? `<button class="btn sm" data-act="opening-swing" title="Anschlag und Öffnungsrichtung wechseln">Aufschlag drehen</button>` : ''}
         ${
-          isOnWall(o, floor.rooms)
+          isOnWall(o, floor)
             ? `<span class="hint-text">Ziehen = entlang der Wand verschieben · Enden ziehen = Breite ändern</span>`
             : `<span class="field-warn">Liegt auf keiner Wand und wird in 3D nicht dargestellt. Auf eine Wand ziehen oder löschen.</span>`
         }
         <div class="btn-row">
           <button class="btn sm danger" data-act="opening-del">Löschen</button>
+        </div>
+      </section>`;
+  }
+
+  function renderWallSection(w) {
+    return `
+      <section class="panel">
+        <h2 class="panel-title">Wand</h2>
+        <label class="field"><span>Länge (m)</span>
+          <input class="input" type="number" step="0.1" min="${MIN_WALL}" data-bind="wall:length" value="${round2(wallLength(w))}">
+        </label>
+        <span class="hint-text">Ziehen = verschieben · Enden ziehen = Länge und Richtung ändern · Türen und Glaswände lassen sich daraufsetzen</span>
+        <div class="btn-row">
+          <button class="btn sm" data-act="wall-dup">Duplizieren</button>
+          <button class="btn sm danger" data-act="wall-del">Löschen</button>
         </div>
       </section>`;
   }
@@ -935,6 +1094,15 @@ export function createEditor(root) {
           <label class="field"><span>Breite (m)</span><input class="input" type="number" step="0.1" min="0.5" data-bind="room:width" value="${round2(room.width)}"></label>
           <label class="field"><span>Tiefe (m)</span><input class="input" type="number" step="0.1" min="0.5" data-bind="room:depth" value="${round2(room.depth)}"></label>
         </div>
+        <div class="field">
+          <span>Drehung (°)</span>
+          <div class="color-row">
+            <input class="input" type="number" step="1" data-bind="room:rotation" value="${roomRotation(room)}">
+            <button class="btn sm" data-act="room-rotate" data-deg="-15" title="15° gegen den Uhrzeigersinn">↺</button>
+            <button class="btn sm" data-act="room-rotate" data-deg="15" title="15° im Uhrzeigersinn">↻</button>
+          </div>
+          <span class="hint-text">Auch am Kreis-Griff über dem Raum (Raster 15°, Alt = frei). X/Z ist die linke obere Ecke vor dem Drehen.</span>
+        </div>
         <div class="area-row"><span>Fläche</span><strong data-out="room-area">${areaText(roomArea(room))}</strong></div>
         <div class="field">
           <span>Bodentanks</span>
@@ -983,6 +1151,7 @@ export function createEditor(root) {
 
     $('#e-props').innerHTML = `
       ${selectedOpening() ? renderOpeningSection(selectedOpening(), floor) : ''}
+      ${selectedWall() ? renderWallSection(selectedWall()) : ''}
       ${tank ? renderTankSection(tank) : ''}
       ${printer ? renderPrinterSection(printer) : ''}
       ${roomSection}
@@ -1135,10 +1304,12 @@ export function createEditor(root) {
       state.selectedRoomId === roomId &&
       state.selectedTankId === tankId &&
       state.selectedPrinterId === printerId &&
-      !state.selectedOpeningId
+      !state.selectedOpeningId &&
+      !state.selectedWallId
     )
       return;
     state.selectedOpeningId = null;
+    state.selectedWallId = null;
     state.selectedRoomId = roomId;
     state.selectedTankId = roomId ? tankId : null;
     state.selectedPrinterId = roomId ? printerId : null;
@@ -1153,6 +1324,7 @@ export function createEditor(root) {
   function setFloor(floorId, { fit = false } = {}) {
     state.floorId = floorId;
     state.selectedOpeningId = null;
+    state.selectedWallId = null;
     state.selectedRoomId = null;
     state.selectedTankId = null;
     state.selectedPrinterId = null;
@@ -1170,6 +1342,7 @@ export function createEditor(root) {
     const panelTool = [state.tool, tool].some((t) => t === 'calibrate' || t === 'underlay');
     if (tool !== 'calibrate') calib = null;
     draftGlass = null;
+    draftWall = null;
     state.tool = tool;
     renderToolbar();
     renderPlan();
@@ -1233,6 +1406,18 @@ export function createEditor(root) {
   }
 
   function deleteSelected() {
+    if (state.selectedWallId) {
+      const id = state.selectedWallId;
+      state.selectedWallId = null;
+      store.mutate((b) => {
+        const f = b.floors.find((x) => x.id === state.floorId);
+        const wall = f.walls.find((w) => w.id === id);
+        f.walls = f.walls.filter((w) => w.id !== id);
+        // Türen/Glas nur auf dieser Wand gehen mit
+        if (f.openings) f.openings = f.openings.filter((o) => !isOnFreeWall(o, wall) || isOnWall(o, f));
+      });
+      return;
+    }
     if (state.selectedOpeningId) {
       const id = state.selectedOpeningId;
       state.selectedOpeningId = null;
@@ -1268,11 +1453,17 @@ export function createEditor(root) {
       const room = f.rooms.find((r) => r.id === id);
       f.rooms = f.rooms.filter((r) => r.id !== id);
       // Türen/Glas nur dieses Raums (z. B. in einer Außenwand) gehen mit, gemeinsame mit Nachbarn bleiben
-      if (f.openings) f.openings = f.openings.filter((o) => !isOnRoom(o, room) || isOnWall(o, f.rooms));
+      if (f.openings) f.openings = f.openings.filter((o) => !isOnRoom(o, room) || isOnWall(o, f));
     });
   }
 
   function duplicateSelected() {
+    const wall = selectedWall();
+    if (wall) {
+      const { id, ...rest } = wall;
+      addWall({ ...rest, x1: wall.x1 + 0.5, z1: wall.z1 + 0.5, x2: wall.x2 + 0.5, z2: wall.z2 + 0.5 });
+      return;
+    }
     const room = selectedRoom();
     if (!room) return;
     const tank = selectedTank();
@@ -1289,12 +1480,23 @@ export function createEditor(root) {
   }
 
   function moveSelected(dx, dz) {
+    if (selectedWall()) {
+      store.mutate((b) => {
+        const w = wallById(b);
+        const f = b.floors.find((x) => x.id === state.floorId);
+        for (const o of wallOpenings(f, w)) translateOpening(o, dx, dz);
+        translateOpening(w, dx, dz);
+      });
+      return;
+    }
     if (!selectedRoom()) return;
     store.mutate((b) => {
       const item = tankById(b) ?? printerById(b);
       if (item) {
-        item.x = round2(item.x + dx);
-        item.z = round2(item.z + dz);
+        // Pfeiltasten wirken im Grundriss, Gegenstände liegen im (evtl. gedrehten) Raum
+        const [lx, lz] = vectorToRoom(roomById(b, state.selectedRoomId), [dx, dz]);
+        item.x = round2(item.x + lx);
+        item.z = round2(item.z + lz);
         clampItems(roomById(b, state.selectedRoomId));
         return;
       }
@@ -1350,6 +1552,7 @@ export function createEditor(root) {
         rooms: src.rooms.map((r) => cloneRoom(r)),
         ...(src.underlay ? { underlay: { ...src.underlay } } : {}),
         ...(src.openings?.length ? { openings: src.openings.map(({ id, ...o }) => createOpening(o)) } : {}),
+        ...(src.walls?.length ? { walls: src.walls.map(({ id, ...w }) => createWall(w)) } : {}),
       });
       store.mutate((b) => b.floors.splice(idx + 1, 0, copy));
       setFloor(copy.id);
@@ -1373,6 +1576,10 @@ export function createEditor(root) {
     'tool-stairs': () => setTool('stairs'),
     'tool-door': () => setTool('door'),
     'tool-glass': () => setTool('glass'),
+    'tool-wall': () => setTool('wall'),
+    'wall-dup': duplicateSelected,
+    'wall-del': deleteSelected,
+    'room-rotate': (btn) => rotateRoom(roomRotation(selectedRoom()) + Number(btn.dataset.deg)),
     'opening-type': (btn) => {
       store.mutate((b) => (openingById(b).type = btn.dataset.type));
     },
@@ -1492,6 +1699,21 @@ export function createEditor(root) {
     },
   };
 
+  /** Raum auf einen Winkel drehen; Türen und Glaswände auf seinen Wänden drehen mit. */
+  function rotateRoom(deg) {
+    const room = selectedRoom();
+    if (!room) return;
+    const next = normalizeRotation(deg);
+    const delta = next - roomRotation(room);
+    if (!delta) return renderProps();
+    const originals = attachedOpenings(currentFloor(), room).map((o) => ({ ...o }));
+    store.mutate((b) => {
+      const r = roomById(b, state.selectedRoomId);
+      r.rotation = next;
+      rotateOpenings(b.floors.find((f) => f.id === state.floorId), originals, roomCenter(r), delta);
+    });
+  }
+
   function moveFloor(dir) {
     const idx = floors().findIndex((f) => f.id === state.floorId);
     const target = idx + dir;
@@ -1568,6 +1790,23 @@ export function createEditor(root) {
       });
       return;
     }
+    if (scope === 'wall' && key === 'length') {
+      const length = parseFloat(String(value).replace(',', '.'));
+      if (!(length >= MIN_WALL)) return renderProps();
+      // Anfang bleibt, das Ende wandert in gleicher Richtung
+      store.mutate((b) => {
+        const w = wallById(b);
+        const [ux, uz] = openingDir(w);
+        w.x2 = round3(w.x1 + ux * length);
+        w.z2 = round3(w.z1 + uz * length);
+      });
+      return;
+    }
+    if (scope === 'room' && key === 'rotation') {
+      const deg = parseFloat(String(value).replace(',', '.'));
+      if (!Number.isFinite(deg)) return renderProps();
+      return rotateRoom(deg);
+    }
     if (scope === 'tank' && key === 'count') {
       const count = clamp(parseInt(value, 10) || 0, 0, MAX_PORTS);
       store.mutate((b) => {
@@ -1605,7 +1844,9 @@ export function createEditor(root) {
         const f = b.floors.find((x) => x.id === state.floorId);
         for (const o of attachedOpenings(f, target)) translateOpening(o, key === 'x' ? d : 0, key === 'z' ? d : 0);
       }
+      const corner = scope === 'room' && (key === 'width' || key === 'depth') && roomToWorld(target, [target.x, target.z]);
       target[key] = value;
+      if (corner && roomRotation(target)) placeCorner(target, corner);
       const room = roomById(b, state.selectedRoomId);
       if (scope === 'room' && ['width', 'depth', 'cutW', 'cutD'].includes(key)) clampCut(room);
       if (room && (scope === 'tank' || ['width', 'depth', 'cutW', 'cutD', 'cutCorner'].includes(key))) clampItems(room);
@@ -1673,6 +1914,13 @@ export function createEditor(root) {
       addDoor(w, e.altKey);
       return;
     }
+    if (state.tool === 'wall') {
+      const [x, z] = snapWallPoint(w, e.altKey);
+      drag = { type: 'wall-draw', start: [x, z] };
+      draftWall = { x1: x, z1: z, x2: x, z2: z };
+      renderPlan();
+      return;
+    }
     if (state.tool === 'glass') {
       const wall = wallAt(w);
       if (wall) {
@@ -1682,23 +1930,13 @@ export function createEditor(root) {
       }
       return;
     }
-    if (state.tool === 'tank') {
+    if (state.tool === 'tank' || state.tool === 'printer') {
       const room = roomAt(w);
       if (room) {
-        addTank(room, {
-          x: snapValue(w.x - room.x, e.altKey, TANK_SNAP),
-          z: snapValue(w.z - room.z, e.altKey, TANK_SNAP),
-        });
-      }
-      return;
-    }
-    if (state.tool === 'printer') {
-      const room = roomAt(w);
-      if (room) {
-        addPrinter(room, {
-          x: snapValue(w.x - room.x, e.altKey, TANK_SNAP),
-          z: snapValue(w.z - room.z, e.altKey, TANK_SNAP),
-        });
+        const [lx, lz] = worldToRoom(room, [w.x, w.z]);
+        const pos = { x: snapValue(lx - room.x, e.altKey, TANK_SNAP), z: snapValue(lz - room.z, e.altKey, TANK_SNAP) };
+        if (state.tool === 'tank') addTank(room, pos);
+        else addPrinter(room, pos);
       }
       return;
     }
@@ -1711,6 +1949,11 @@ export function createEditor(root) {
     if (openingEl) {
       selectOpening(openingEl.dataset.opening);
       drag = { type: 'opening', start: w, orig: { ...selectedOpening() }, started: false };
+      return;
+    }
+    const wHandleEl = e.target.closest('[data-whandle]');
+    if (wHandleEl && selectedWall()) {
+      drag = { type: 'wall-end', end: wHandleEl.dataset.whandle, start: w, started: false };
       return;
     }
     if (printerEl) {
@@ -1733,6 +1976,16 @@ export function createEditor(root) {
       drag = { type: 'tank', start: w, orig: { x: t.x, z: t.z }, started: false };
       return;
     }
+    if (handleEl && selectedRoom() && handleEl.dataset.handle === 'rotate') {
+      const r = selectedRoom();
+      drag = {
+        type: 'rotate',
+        start: w,
+        orig: { rotation: roomRotation(r), openings: attachedOpenings(currentFloor(), r).map((o) => ({ ...o })) },
+        started: false,
+      };
+      return;
+    }
     if (handleEl && selectedRoom()) {
       const r = selectedRoom();
       drag = {
@@ -1746,6 +1999,15 @@ export function createEditor(root) {
         },
         started: false,
       };
+      return;
+    }
+    const wallEl = e.target.closest('[data-wall]');
+    if (wallEl) {
+      selectWall(wallEl.dataset.wall);
+      const f = currentFloor();
+      const wall = selectedWall();
+      const openings = wallOpenings(f, wall).map((o) => ({ ...o }));
+      drag = { type: 'wall', start: w, orig: { ...wall, openings }, started: false };
       return;
     }
     if (roomEl) {
@@ -1779,6 +2041,13 @@ export function createEditor(root) {
       const { wall } = drag;
       const t = (w.x - wall.p[0]) * wall.u[0] + (w.z - wall.p[1]) * wall.u[1];
       updateDraftGlass(clamp(snapValue(t, e.altKey, TANK_SNAP), 0, wall.len));
+      return;
+    }
+
+    if (drag.type === 'wall-draw') {
+      const [x2, z2] = snapWallPoint(w, e.altKey, drag.start, e.shiftKey);
+      draftWall = { x1: drag.start[0], z1: drag.start[1], x2, z2 };
+      renderPlan();
       return;
     }
 
@@ -1824,6 +2093,30 @@ export function createEditor(root) {
           }
           return;
         }
+        if (drag.type === 'wall' || drag.type === 'wall-end') {
+          const fw = wallById(b);
+          const f = b.floors.find((x) => x.id === state.floorId);
+          if (drag.type === 'wall-end') {
+            const fixed = drag.end === 'a' ? [fw.x2, fw.z2] : [fw.x1, fw.z1];
+            const [x, z] = snapWallPoint(w, free, fixed, e.shiftKey);
+            if (Math.hypot(x - fixed[0], z - fixed[1]) < MIN_WALL) return;
+            if (drag.end === 'a') Object.assign(fw, { x1: x, z1: z });
+            else Object.assign(fw, { x2: x, z2: z });
+            return;
+          }
+          const src = drag.orig;
+          const mx = snapValue(dx, free);
+          const mz = snapValue(dz, free);
+          Object.assign(fw, { x1: src.x1, z1: src.z1, x2: src.x2, z2: src.z2 });
+          translateOpening(fw, mx, mz);
+          for (const o0 of src.openings) {
+            const o = f.openings.find((x) => x.id === o0.id);
+            if (!o) continue;
+            Object.assign(o, { x1: o0.x1, z1: o0.z1, x2: o0.x2, z2: o0.z2 });
+            translateOpening(o, mx, mz);
+          }
+          return;
+        }
         if (drag.type === 'underlay') {
           const u = b.floors.find((f) => f.id === state.floorId).underlay;
           u.x = round2(drag.orig.x + dx);
@@ -1834,8 +2127,9 @@ export function createEditor(root) {
         if (!r) return;
         if (drag.type === 'tank' || drag.type === 'printer') {
           const item = drag.type === 'tank' ? tankById(b) : printerById(b);
-          item.x = snapValue(drag.orig.x + dx, free, TANK_SNAP);
-          item.z = snapValue(drag.orig.z + dz, free, TANK_SNAP);
+          const [lx, lz] = vectorToRoom(r, [dx, dz]);
+          item.x = snapValue(drag.orig.x + lx, free, TANK_SNAP);
+          item.z = snapValue(drag.orig.z + lz, free, TANK_SNAP);
           clampItems(r);
           return;
         }
@@ -1851,40 +2145,56 @@ export function createEditor(root) {
           }
           return;
         }
+        if (drag.type === 'rotate') {
+          // Griff sitzt über der oberen Kante: Winkel 0 = Griff genau nach oben
+          const [cx, cz] = roomCenter(r);
+          const raw = (Math.atan2(w.x - cx, cz - w.z) * 180) / Math.PI;
+          const next = normalizeRotation(free ? Math.round(raw) : Math.round(raw / 15) * 15);
+          r.rotation = next;
+          rotateOpenings(b.floors.find((x) => x.id === state.floorId), drag.orig.openings, [cx, cz], next - drag.orig.rotation);
+          return;
+        }
         const o = drag.orig;
         const h = drag.handle;
         if (h === 'cut') {
           const { corner, east, north } = cutHandle(r);
-          const px = snapValue(w.x, free);
-          const pz = snapValue(w.z, free);
+          const [lx, lz] = worldToRoom(r, [w.x, w.z]);
+          const px = snapValue(lx, free);
+          const pz = snapValue(lz, free);
           r.cutW = round2(east ? corner[0] - px : px - corner[0]);
           r.cutD = round2(north ? pz - corner[1] : corner[1] - pz);
           clampCut(r);
           clampItems(r);
           return;
         }
-        if (h.includes('w')) {
-          const x = Math.min(snapValue(o.x + dx, free), o.x + o.width - MIN_SIZE);
-          r.x = round2(x);
-          r.width = round2(o.x + o.width - x);
-        }
-        if (h.includes('e')) r.width = round2(Math.max(MIN_SIZE, snapValue(o.x + o.width + dx, free) - o.x));
-        if (h.includes('n')) {
-          const z = Math.min(snapValue(o.z + dz, free), o.z + o.depth - MIN_SIZE);
-          r.z = round2(z);
-          r.depth = round2(o.z + o.depth - z);
-        }
-        if (h.includes('s')) r.depth = round2(Math.max(MIN_SIZE, snapValue(o.z + o.depth + dz, free) - o.z));
+        // Gerechnet wird im ungedrehten Raum; ohne Drehung rasten die Kanten am Raster,
+        // gedreht die Maße (das Raster liegt dann schräg zum Raum)
+        const rotated = Boolean(roomRotation(o));
+        const [ldx, ldz] = vectorToRoom(o, [dx, dz]);
+        const edge = (start, size, d, lower) => {
+          if (!rotated) return snapValue(start + (lower ? 0 : size) + d, free);
+          return lower ? start + size - snapValue(size - d, free) : start + snapValue(size + d, free);
+        };
+        let [x0, z0, x1, z1] = [o.x, o.z, o.x + o.width, o.z + o.depth];
+        if (h.includes('w')) x0 = Math.min(edge(o.x, o.width, ldx, true), x1 - MIN_SIZE);
+        if (h.includes('e')) x1 = Math.max(edge(o.x, o.width, ldx, false), x0 + MIN_SIZE);
+        if (h.includes('n')) z0 = Math.min(edge(o.z, o.depth, ldz, true), z1 - MIN_SIZE);
+        if (h.includes('s')) z1 = Math.max(edge(o.z, o.depth, ldz, false), z0 + MIN_SIZE);
+        r.width = round2(x1 - x0);
+        r.depth = round2(z1 - z0);
+        // gegenüberliegende Seite bleibt im Gebäude stehen: neue Mitte mit dem alten Raum drehen
+        const [cx, cz] = roomToWorld(o, [(x0 + x1) / 2, (z0 + z1) / 2]);
+        r.x = round3(cx - r.width / 2);
+        r.z = round3(cz - r.depth / 2);
         clampCut(r);
         // Bodentanks und Drucker bleiben beim Ändern der Raumgröße an ihrer Stelle im Gebäude
-        r.tanks.forEach((t, i) => {
-          t.x = o.tanks[i].x + (o.x - r.x);
-          t.z = o.tanks[i].z + (o.z - r.z);
-        });
-        r.printers.forEach((p, i) => {
-          p.x = o.printers[i].x + (o.x - r.x);
-          p.z = o.printers[i].z + (o.z - r.z);
-        });
+        const keep = (item, src) => {
+          const [lx, lz] = worldToRoom(r, itemWorld(o, src));
+          item.x = round2(lx - r.x);
+          item.z = round2(lz - r.z);
+        };
+        r.tanks.forEach((t, i) => keep(t, o.tanks[i]));
+        r.printers.forEach((p, i) => keep(p, o.printers[i]));
         clampItems(r);
       },
       { checkpoint: false },
@@ -1892,6 +2202,14 @@ export function createEditor(root) {
   });
 
   const endDrag = () => {
+    if (drag?.type === 'wall-draw' && draftWall) {
+      const wall = draftWall;
+      draftWall = null;
+      drag = null;
+      if (wallLength(wall) >= MIN_WALL) addWall(wall);
+      else renderPlan();
+      return;
+    }
     if (drag?.type === 'glass' && draftGlass) {
       const { wall, t0 } = drag;
       let [a, b] = [t0, drag.t1 ?? t0].sort((x, y) => x - y);
@@ -1957,10 +2275,11 @@ export function createEditor(root) {
     else if (key === 'escape') {
       draftRect = null;
       draftGlass = null;
+      draftWall = null;
       calib = null;
       drag = null;
       setTool('select');
-      if (state.selectedOpeningId) select(null);
+      if (state.selectedOpeningId || state.selectedWallId) select(null);
       else if (state.selectedTankId || state.selectedPrinterId) select(state.selectedRoomId, null);
       else select(null);
     } else if (key === 'r' && !ctrl) setTool('draw');
@@ -1970,8 +2289,9 @@ export function createEditor(root) {
     else if (key === 'p' && !ctrl) setTool('printer');
     else if (key === 'd' && !ctrl) setTool('door');
     else if (key === 'g' && !ctrl) setTool('glass');
+    else if (key === 'w' && !ctrl) setTool('wall');
     else if (key === 'v' && !ctrl) setTool('select');
-    else if (key.startsWith('arrow') && state.selectedRoomId) {
+    else if (key.startsWith('arrow') && (state.selectedRoomId || state.selectedWallId)) {
       const base = state.selectedTankId || state.selectedPrinterId ? TANK_SNAP : state.snap;
       const step = e.shiftKey ? 1 : base;
       const d = { arrowleft: [-step, 0], arrowright: [step, 0], arrowup: [0, -step], arrowdown: [0, step] }[key];
@@ -1987,6 +2307,7 @@ export function createEditor(root) {
     if (state.selectedTankId && !selectedTank()) state.selectedTankId = null;
     if (state.selectedPrinterId && !selectedPrinter()) state.selectedPrinterId = null;
     if (state.selectedOpeningId && !selectedOpening()) state.selectedOpeningId = null;
+    if (state.selectedWallId && !selectedWall()) state.selectedWallId = null;
     syncPreview();
     renderToolbar();
     renderPlan();

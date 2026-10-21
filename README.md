@@ -39,6 +39,9 @@ Deployment auf Ubuntu mit nginx: siehe [deploy/README.md](deploy/README.md) (`np
   - `R` Raum zeichnen, `V` Auswählen, Ziehen = verschieben, Griffe = Größe ändern
   - `Entf` löschen, `Strg+D` duplizieren, Pfeiltasten verschieben, `Strg+Z / Strg+Y`
   - `Alt` beim Ziehen = ohne Raster
+  - **Drehung**: Kreis-Griff über dem ausgewählten Raum ziehen (Raster 15°, `Alt` = frei) oder rechts unter „Drehung“
+    eingeben bzw. mit ↺/↻ in 15°-Schritten. Gedreht wird um die Raummitte; Bodentanks, Drucker, Treppen, Türen
+    und Glaswände drehen mit. X/Z bezeichnen die linke obere Ecke des Raums vor dem Drehen.
   - **Raumform** (rechts unter „Form“): Rechteck, **L-Form** (Aussparung an einer Ecke) oder **schräge Wand**
     (Ecke diagonal abgeschnitten). Ecke und Größe rechts einstellen oder am Rauten-Griff im Grundriss ziehen.
   - **Fläche** in m² steht im Grundriss, in der Raumliste und rechts beim Raum (plus Summe der Etage);
@@ -74,18 +77,26 @@ Deployment auf Ubuntu mit nginx: siehe [deploy/README.md](deploy/README.md) (`np
   Tür zum Geschosspodest. Nur bei zweiläufigen Treppen; quer zur Laufrichtung braucht das Treppenhaus mindestens
   ca. 3,1 m. Der Schacht wird auf jeder Etage gezeichnet, auch auf der obersten.
 
-Räume vom Typ **Flur** bekommen keine Wände zu angrenzenden Räumen; Räume, die an einen Flur grenzen,
-bekommen automatisch eine Tür.
+Räume vom Typ **Flur** bekommen keine Wände zu angrenzenden Räumen. Türen zum Flur werden nicht automatisch
+gesetzt, sondern wie alle Türen mit dem Werkzeug **Tür** (`D`).
 
 ### Türen und Glaswände
 
-- **Tür** (`D` im Editor): auf eine Wand klicken – zwischen zwei Räumen, zum Flur oder nach außen. Eine eigene
-  Tür zum Flur ersetzt dort die automatische. „Aufschlag drehen“ wechselt Anschlag und Öffnungsrichtung im Grundriss.
+- **Tür** (`D` im Editor): auf eine Wand klicken – zwischen zwei Räumen, zum Flur, nach außen oder auf eine freie Wand.
+  „Aufschlag drehen“ wechselt Anschlag und Öffnungsrichtung im Grundriss.
 - **Glaswand** (`G`): an einer Wand entlang ziehen (Klick = 2 m). In 3D eine Glasscheibe mit Profilen oben und unten.
+  Eine Tür in einer Glaswand bekommt darüber Glas (Oberlicht) statt eines Wandsturzes – egal, ob Tür oder Glas zuerst da war.
 - Anklicken = auswählen, ziehen = entlang der Wand verschieben, Enden ziehen = Breite ändern, `Entf` = löschen.
   Rechts lässt sich zwischen Tür und Glaswand wechseln und die Breite eingeben.
-- Wird ein Raum verschoben, wandern seine Türen und Glaswände mit. Liegt eine nicht mehr auf einer Wand,
+- Wird ein Raum verschoben oder gedreht, wandern seine Türen und Glaswände mit. Liegt eine nicht mehr auf einer Wand,
   wird sie im Grundriss blass gezeigt und in 3D nicht dargestellt.
+
+### Freie Wände
+
+- **Wand** (`W` im Editor): von Punkt zu Punkt ziehen, in jedem Winkel. Fängt Raumecken und Wandenden in der Nähe,
+  sonst das Raster; `Shift` = nur waagerecht/senkrecht, `Alt` = ohne Raster.
+- Anklicken = auswählen, ziehen = verschieben, Enden ziehen = Länge und Richtung ändern, Länge rechts eingeben,
+  `Strg+D` duplizieren, `Entf` löschen. Türen und Glaswände lassen sich auf freie Wände setzen und wandern mit.
 
 „Beispiel laden“ stellt das Testgebäude (Flur mit 6 Räumen) wieder her.
 

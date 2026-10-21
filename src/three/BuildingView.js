@@ -2,11 +2,19 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { roomColor } from '../data/roomTypes.js';
-import { floorBounds, groundIndex, PRINTER_D, PRINTER_W, TANK_SIZE } from '../data/model.js';
+import { floorBounds, groundIndex, itemWorld, PRINTER_D, PRINTER_W, TANK_SIZE } from '../data/model.js';
 import { computeWalls } from './walls.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { stairLayout, subtractRects } from '../data/stairs.js';
-import { clipConvex, roomLabelPoint, roomPieces, roomPolygon } from '../data/shape.js';
+import { stairLayout } from '../data/stairs.js';
+import {
+  roomCenter,
+  roomLabelPoint,
+  roomPieces,
+  roomPolygon,
+  roomRotation,
+  roomToWorld,
+  subtractConvex,
+} from '../data/shape.js';
 import { esc } from '../utils.js';
 
 const SLAB_T = 0.2;
@@ -35,26 +43,41 @@ function prismGeometry(poly, h) {
   return new THREE.ExtrudeGeometry(toShape(poly), { depth: h, bevelEnabled: false }).rotateX(-Math.PI / 2);
 }
 
-/** Boden eines Raums ohne Deckenöffnungen: jedes konvexe Teil minus Öffnungen, auf das Teil zugeschnitten. */
-function roomFloorGeometry(room, openings) {
-  const polys = [];
-  for (const piece of roomPieces(room)) {
-    const xs = piece.map((p) => p[0]);
-    const zs = piece.map((p) => p[1]);
-    const box = { x: Math.min(...xs), z: Math.min(...zs) };
-    box.w = Math.max(...xs) - box.x;
-    box.d = Math.max(...zs) - box.z;
-    for (const r of subtractRects(box, openings)) {
-      const poly = clipConvex([[r.x, r.z], [r.x + r.w, r.z], [r.x + r.w, r.z + r.d], [r.x, r.z + r.d]], piece);
-      if (poly) polys.push(poly);
-    }
-  }
+/** Konvexe Teile minus konvexe Löcher (Deckenöffnungen) als Liste konvexer Polygone. */
+function cutHoles(pieces, holes) {
+  let polys = pieces;
+  for (const hole of holes) polys = polys.flatMap((p) => subtractConvex(p, hole));
+  return polys;
+}
+
+/** Polygone als eine Geometrie: Prismen der Höhe `h` oder (h = 0) Bodenflächen. */
+function polysGeometry(polys, h) {
   if (!polys.length) return new THREE.PlaneGeometry(0, 0);
-  const geos = polys.map((poly) => new THREE.ShapeGeometry(toShape(poly)).rotateX(-Math.PI / 2));
+  const geos = polys.map((poly) =>
+    h ? prismGeometry(poly, h) : new THREE.ShapeGeometry(toShape(poly)).rotateX(-Math.PI / 2),
+  );
   if (geos.length === 1) return geos[0];
   const merged = mergeGeometries(geos);
   geos.forEach((g) => g.dispose());
   return merged;
+}
+
+/** Deckenöffnung über einer Treppe als Polygon in Weltkoordinaten (Treppenhaus kann gedreht sein). */
+function stairOpening(room, height) {
+  const { x, z, w, d } = stairLayout(room, height).opening;
+  return [[x, z], [x + w, z], [x + w, z + d], [x, z + d]].map((p) => roomToWorld(room, p));
+}
+
+/** Gruppe, in der ungedrehte Raumkoordinaten gelten (für Treppen und Aufzug gedrehter Räume). */
+function roomFrame(room) {
+  const frame = new THREE.Group();
+  const [cx, cz] = roomCenter(room);
+  frame.position.set(cx, 0, cz);
+  frame.rotation.y = -THREE.MathUtils.degToRad(roomRotation(room));
+  const inner = new THREE.Group();
+  inner.position.set(-cx, 0, -cz);
+  frame.add(inner);
+  return { frame, inner };
 }
 
 const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
@@ -169,7 +192,7 @@ export class BuildingView {
         hasFloorAbove: index < building.floors.length - 1,
         // Deckenöffnungen über den Treppen der Etage darunter
         openings: below
-          ? below.rooms.filter((r) => r.type === 'stairs').map((r) => stairLayout(r, below.height).opening)
+          ? below.rooms.filter((r) => r.type === 'stairs').map((r) => stairOpening(r, below.height))
           : [],
       };
       const group = this.buildFloor(floor, context);
@@ -293,17 +316,13 @@ export class BuildingView {
 
     if (bounds) {
       const pad = 0.15;
-      const outline = {
-        x: bounds.minX - pad,
-        z: bounds.minZ - pad,
-        w: bounds.maxX - bounds.minX + pad * 2,
-        d: bounds.maxZ - bounds.minZ + pad * 2,
-      };
+      const [x0, z0, x1, z1] = [bounds.minX - pad, bounds.minZ - pad, bounds.maxX + pad, bounds.maxZ + pad];
+      const outline = [[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
       const slab = new THREE.Mesh(
-        rectsGeometry(subtractRects(outline, openings), SLAB_T),
+        polysGeometry(cutHoles([outline], openings), SLAB_T),
         material({ color: 0xd3d8df, roughness: 0.9 }),
       );
-      slab.position.y = -SLAB_T / 2;
+      slab.position.y = -SLAB_T;
       slab.receiveShadow = true;
       slab.castShadow = true;
       group.add(slab);
@@ -319,7 +338,7 @@ export class BuildingView {
 
     for (const room of floor.rooms) {
       const mesh = new THREE.Mesh(
-        roomFloorGeometry(room, openings),
+        polysGeometry(cutHoles(roomPieces(room), openings), 0),
         material({ color: roomColor(room), roughness: 0.85 }),
       );
       mesh.position.y = 0.01;
@@ -340,17 +359,21 @@ export class BuildingView {
 
       this.rooms.set(room.id, { mesh, label, floorId: floor.id, room });
 
-      if (room.type === 'stairs' && hasFloorAbove) stairTops.push(...this.buildStairs(group, room, floor, material, wallH));
-      if (room.type === 'stairs') this.buildElevator(group, room, floor, material, wallH);
+      if (room.type === 'stairs') {
+        const { frame, inner } = roomFrame(room);
+        group.add(frame);
+        if (hasFloorAbove) stairTops.push(...this.buildStairs(inner, room, floor, material, wallH));
+        this.buildElevator(inner, room, floor, material, wallH);
+      }
 
       for (const tank of room.tanks) {
-        const tx = room.x + tank.x;
-        const tz = room.z + tank.z;
+        const [tx, tz] = itemWorld(room, tank);
         const lid = new THREE.Mesh(
           new THREE.BoxGeometry(TANK_SIZE, 0.03, TANK_SIZE),
           material({ color: 0x6f7782, roughness: 0.35, metalness: 0.6 }),
         );
         lid.position.set(tx, 0.025, tz);
+        lid.rotation.y = -THREE.MathUtils.degToRad(roomRotation(room));
         lid.castShadow = true;
         lid.userData = { tankId: tank.id, roomId: room.id, floorId: floor.id };
         group.add(lid);
@@ -373,14 +396,16 @@ export class BuildingView {
       }
 
       for (const printer of room.printers) {
-        const px = room.x + printer.x;
-        const pz = room.z + printer.z;
+        const [px, pz] = itemWorld(room, printer);
         const bodyH = 0.42;
+        const unit = new THREE.Group();
+        unit.position.set(px, 0, pz);
+        unit.rotation.y = -THREE.MathUtils.degToRad(roomRotation(room));
         const body = new THREE.Mesh(
           new THREE.BoxGeometry(PRINTER_W * 0.9, bodyH, PRINTER_D * 0.9),
           material({ color: 0xe9ecf0, roughness: 0.6 }),
         );
-        body.position.set(px, bodyH / 2, pz);
+        body.position.set(0, bodyH / 2, 0);
         body.castShadow = true;
         body.receiveShadow = true;
         body.userData = { printerId: printer.id, roomId: room.id, floorId: floor.id };
@@ -388,14 +413,15 @@ export class BuildingView {
           new THREE.BoxGeometry(PRINTER_W * 0.9, 0.06, PRINTER_D * 0.9),
           material({ color: 0x3b4352, roughness: 0.5 }),
         );
-        top.position.set(px, bodyH + 0.03, pz);
+        top.position.set(0, bodyH + 0.03, 0);
         top.castShadow = true;
         const tray = new THREE.Mesh(
           new THREE.BoxGeometry(PRINTER_W * 0.6, 0.02, 0.12),
           material({ color: 0xffffff, roughness: 0.9 }),
         );
-        tray.position.set(px, bodyH * 0.55, pz + PRINTER_D * 0.45 + 0.05);
-        group.add(body, top, tray);
+        tray.position.set(0, bodyH * 0.55, PRINTER_D * 0.45 + 0.05);
+        unit.add(body, top, tray);
+        group.add(unit);
 
         const tagEl = document.createElement('button');
         tagEl.type = 'button';
@@ -418,17 +444,20 @@ export class BuildingView {
     const wallMat = material({ color: 0xfbfbf9, roughness: 0.7 });
     let glassMat = null;
     let frameMat = null;
-    for (const seg of computeWalls(floor.rooms, 1, floor.openings ?? [])) {
+    for (const seg of computeWalls(floor.rooms, floor.openings ?? [], floor.walls ?? [])) {
       if (seg.len < 0.01) continue;
-      if (seg.kind === 'glass') {
+      if (seg.kind === 'glass' || seg.kind === 'transom') {
+        // Oberlicht über einer Tür in der Glaswand: Glas ab Türhöhe, Profil auch über der Tür
+        const y0 = seg.kind === 'transom' ? Math.min(DOOR_H, wallH) : 0;
+        if (wallH - y0 < 0.02) continue;
         glassMat ??= material({ color: 0x9cc7e0, roughness: 0.05, metalness: 0.1, transparent: true, opacity: 0.32, depthWrite: false });
         frameMat ??= material({ color: 0x5b6573, roughness: 0.5, metalness: 0.4 });
-        const prof = Math.min(0.05, wallH / 4);
-        const pane = new THREE.Mesh(prismGeometry(seg.quad, wallH - prof * 2), glassMat);
-        pane.position.y = prof;
+        const prof = Math.min(0.05, (wallH - y0) / 4);
+        const pane = new THREE.Mesh(prismGeometry(seg.quad, wallH - y0 - prof * 2), glassMat);
+        pane.position.y = y0 + prof;
         group.add(pane);
         // Profile unten und oben
-        for (const y of [0, wallH - prof]) {
+        for (const y of [y0, wallH - prof]) {
           const frame = new THREE.Mesh(prismGeometry(seg.quad, prof), frameMat);
           frame.position.y = y;
           frame.castShadow = true;

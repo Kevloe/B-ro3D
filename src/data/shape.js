@@ -23,6 +23,45 @@ export const MIN_CUT = 0.5;
 const MIN_REST = 0.5; // so viel bleibt bei einer L-Form mindestens stehen
 const EPS = 1e-6;
 
+/**
+ * Drehung: `rotation` in Grad um die Mitte des umschließenden Rechtecks, positiv = im Grundriss
+ * im Uhrzeigersinn. x/z/width/depth, Aussparung, Bodentanks und Drucker gelten im ungedrehten Raum
+ * („lokal“); erst der Umriss in Weltkoordinaten wird gedreht.
+ */
+export const roomRotation = (room) => {
+  const r = Number(room.rotation) || 0;
+  return Math.abs(r) < 1e-9 ? 0 : r;
+};
+
+/** Winkel auf (-180, 180] bringen, auf 0,1° gerundet. */
+export function normalizeRotation(deg) {
+  let r = ((Number(deg) || 0) % 360 + 360) % 360;
+  if (r > 180) r -= 360;
+  return Math.round(r * 10) / 10 || 0;
+}
+
+export const roomCenter = (room) => [room.x + room.width / 2, room.z + room.depth / 2];
+
+/** Punkt um `center` drehen (Grad, im Grundriss im Uhrzeigersinn). */
+export function rotatePoint([x, z], [cx, cz], deg) {
+  if (!deg) return [x, z];
+  const a = (deg * Math.PI) / 180;
+  const c = Math.cos(a);
+  const s = Math.sin(a);
+  const dx = x - cx;
+  const dz = z - cz;
+  return [cx + dx * c - dz * s, cz + dx * s + dz * c];
+}
+
+/** Ungedrehter Punkt des Raums → Weltkoordinaten. */
+export const roomToWorld = (room, p) => rotatePoint(p, roomCenter(room), roomRotation(room));
+
+/** Weltkoordinaten → ungedrehter Punkt des Raums. */
+export const worldToRoom = (room, p) => rotatePoint(p, roomCenter(room), -roomRotation(room));
+
+/** Richtung (Vektor) aus Weltkoordinaten in den ungedrehten Raum. */
+export const vectorToRoom = (room, v) => rotatePoint(v, [0, 0], -roomRotation(room));
+
 /** Form eines Raums; Treppenhäuser sind immer rechteckig. */
 export const roomShape = (room) =>
   room.type !== 'stairs' && (room.shape === 'l' || room.shape === 'chamfer') ? room.shape : 'rect';
@@ -49,6 +88,12 @@ export function defaultCut(room) {
  * Alle Räume haben denselben Umlaufsinn, gemeinsame Kanten laufen also entgegengesetzt.
  */
 export function roomPolygon(room) {
+  const poly = localPolygon(room);
+  return roomRotation(room) ? poly.map((p) => roomToWorld(room, p)) : poly;
+}
+
+/** Umriss ohne Drehung (in den Koordinaten von x/z/width/depth). */
+export function localPolygon(room) {
   const x0 = room.x;
   const z0 = room.z;
   const x1 = room.x + room.width;
@@ -86,9 +131,14 @@ export function roomPolygon(room) {
   });
 }
 
-/** Zerlegung in konvexe Teile (L-Form = zwei Rechtecke). */
+/** Zerlegung in konvexe Teile (L-Form = zwei Rechtecke), in Weltkoordinaten. */
 export function roomPieces(room) {
-  if (roomShape(room) !== 'l') return [roomPolygon(room)];
+  const pieces = localPieces(room);
+  return roomRotation(room) ? pieces.map((poly) => poly.map((p) => roomToWorld(room, p))) : pieces;
+}
+
+function localPieces(room) {
+  if (roomShape(room) !== 'l') return [localPolygon(room)];
   const { x, z, width: w, depth: d, cutW, cutD } = room;
   const c = room.cutCorner;
   const rect = (rx, rz, rw, rd) => [[rx, rz], [rx + rw, rz], [rx + rw, rz + rd], [rx, rz + rd]];
@@ -147,11 +197,12 @@ export function pointInPolygon([px, pz], poly) {
 }
 
 /** Punkt im Raum (Rand zählt dazu). */
-export function pointInRoom(room, p) {
+export function pointInRoom(room, world) {
+  const p = worldToRoom(room, world);
   if (p[0] < room.x - EPS || p[0] > room.x + room.width + EPS) return false;
   if (p[1] < room.z - EPS || p[1] > room.z + room.depth + EPS) return false;
   if (roomShape(room) === 'rect') return true;
-  const poly = roomPolygon(room);
+  const poly = localPolygon(room);
   return pointInPolygon(p, poly) || nearestOnPolygon(poly, p).dist < 1e-3;
 }
 
@@ -176,32 +227,6 @@ export function nearestOnPolygon(poly, [px, pz]) {
   return best;
 }
 
-/** Konvexes Polygon `subject` auf das konvexe Polygon `clip` zuschneiden (Sutherland–Hodgman). */
-export function clipConvex(subject, clip) {
-  let out = subject;
-  for (let i = 0; i < clip.length && out.length; i++) {
-    const [ax, az] = clip[i];
-    const [bx, bz] = clip[(i + 1) % clip.length];
-    const nx = -(bz - az);
-    const nz = bx - ax;
-    const side = ([x, z]) => (x - ax) * nx + (z - az) * nz;
-    const input = out;
-    out = [];
-    for (let k = 0; k < input.length; k++) {
-      const p = input[k];
-      const q = input[(k + 1) % input.length];
-      const sp = side(p);
-      const sq = side(q);
-      if (sp >= -EPS) out.push(p);
-      if ((sp >= -EPS) !== (sq >= -EPS)) {
-        const t = sp / (sp - sq);
-        out.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]);
-      }
-    }
-  }
-  return out.length >= 3 && polygonArea(out) > 1e-6 ? out : null;
-}
-
 function separated(a, b, tol) {
   for (const poly of [a, b]) {
     for (let i = 0; i < poly.length; i++) {
@@ -219,10 +244,66 @@ function separated(a, b, tol) {
   return false;
 }
 
+/** Umschließendes achsparalleles Rechteck des (gedrehten) Raums. */
+export function roomBounds(room) {
+  if (!roomRotation(room)) return { minX: room.x, minZ: room.z, maxX: room.x + room.width, maxZ: room.z + room.depth };
+  const poly = roomPolygon(room);
+  const xs = poly.map((p) => p[0]);
+  const zs = poly.map((p) => p[1]);
+  return { minX: Math.min(...xs), minZ: Math.min(...zs), maxX: Math.max(...xs), maxZ: Math.max(...zs) };
+}
+
 /** Überlappen sich zwei Räume (bloßes Berühren zählt nicht)? */
 export function roomsOverlap(a, b, tol = 0.01) {
-  const w = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
-  const d = Math.min(a.z + a.depth, b.z + b.depth) - Math.max(a.z, b.z);
+  const ba = roomBounds(a);
+  const bb = roomBounds(b);
+  const w = Math.min(ba.maxX, bb.maxX) - Math.max(ba.minX, bb.minX);
+  const d = Math.min(ba.maxZ, bb.maxZ) - Math.max(ba.minZ, bb.minZ);
   if (w <= tol || d <= tol) return false;
   return roomPieces(a).some((pa) => roomPieces(b).some((pb) => !separated(pa, pb, tol)));
+}
+
+/**
+ * Konvexes Polygon minus konvexes Loch als Liste konvexer, sich nicht überlappender Teile
+ * (je Kante des Lochs das Stück außerhalb, der Rest wird weiter zerlegt).
+ */
+export function subtractConvex(subject, hole) {
+  // Loch im Uhrzeigersinn (wie roomPolygon), damit „innen“ für alle Kanten dieselbe Seite ist
+  let signed = 0;
+  for (let i = 0; i < hole.length; i++) {
+    const [x1, z1] = hole[i];
+    const [x2, z2] = hole[(i + 1) % hole.length];
+    signed += x1 * z2 - x2 * z1;
+  }
+  const h = signed < 0 ? [...hole].reverse() : hole;
+  const out = [];
+  let rest = subject;
+  for (let i = 0; i < h.length && rest; i++) {
+    const a = h[i];
+    const b = h[(i + 1) % h.length];
+    const outside = clipHalf(rest, b, a);
+    if (outside) out.push(outside);
+    rest = clipHalf(rest, a, b);
+  }
+  return out;
+}
+
+/** Teil eines konvexen Polygons links der Geraden a → b (im Grundriss: innen bei Uhrzeigersinn). */
+function clipHalf(poly, a, b) {
+  const nx = -(b[1] - a[1]);
+  const nz = b[0] - a[0];
+  const side = ([x, z]) => (x - a[0]) * nx + (z - a[1]) * nz;
+  const out = [];
+  for (let k = 0; k < poly.length; k++) {
+    const p = poly[k];
+    const q = poly[(k + 1) % poly.length];
+    const sp = side(p);
+    const sq = side(q);
+    if (sp >= -EPS) out.push(p);
+    if ((sp >= -EPS) !== (sq >= -EPS)) {
+      const t = sp / (sp - sq);
+      out.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]);
+    }
+  }
+  return out.length >= 3 && polygonArea(out) > 1e-6 ? out : null;
 }

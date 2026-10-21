@@ -42,7 +42,8 @@ export function elevatorFits(room) {
 }
 
 /**
- * Stufen und Podeste eines Treppenhauses in Weltkoordinaten (achsparallele Rechtecke).
+ * Stufen und Podeste eines Treppenhauses in Raumkoordinaten ohne Drehung (achsparallele Rechtecke;
+ * bei gedrehten Räumen dreht der Aufrufer sie mit dem Raum).
  * Gerechnet wird lokal innerhalb der Wände: u quer zur Laufrichtung (0..W), v entlang der
  * Laufrichtung (0..D). Die Treppe beginnt bei v = 0 und führt auf Höhe `height` (nächste Etage).
  *
@@ -139,38 +140,4 @@ export function stairLayout(room, height) {
 
   delete opening.top;
   return { steps, landings, opening, elevator, path: path.map(([u, v]) => toWorld(u, v)) };
-}
-
-const EPS = 1e-4;
-
-/**
- * Rechteck minus Löcher als Liste achsparalleler Rechtecke ({ x, z, w, d }).
- * Robust auch bei Löchern, die den Rand berühren, überlappen oder hinausragen.
- */
-export function subtractRects(rect, holes) {
-  const x1 = rect.x + rect.w;
-  const z1 = rect.z + rect.d;
-  const inside = holes.filter((h) => h.x < x1 - EPS && h.x + h.w > rect.x + EPS && h.z < z1 - EPS && h.z + h.d > rect.z + EPS);
-  if (!inside.length) return [rect];
-  const cut = (vals, lo, hi) => [...new Set([lo, hi, ...vals.filter((v) => v > lo && v < hi)])].sort((a, b) => a - b);
-  const xs = cut(inside.flatMap((h) => [h.x, h.x + h.w]), rect.x, x1);
-  const zs = cut(inside.flatMap((h) => [h.z, h.z + h.d]), rect.z, z1);
-  const out = [];
-  for (let j = 0; j < zs.length - 1; j++) {
-    let run = null;
-    for (let i = 0; i < xs.length - 1; i++) {
-      const cx = (xs[i] + xs[i + 1]) / 2;
-      const cz = (zs[j] + zs[j + 1]) / 2;
-      const open = inside.some((h) => cx > h.x && cx < h.x + h.w && cz > h.z && cz < h.z + h.d);
-      if (open) {
-        run = null;
-      } else if (run) {
-        run.w = xs[i + 1] - run.x;
-      } else {
-        run = { x: xs[i], z: zs[j], w: xs[i + 1] - xs[i], d: zs[j + 1] - zs[j] };
-        out.push(run);
-      }
-    }
-  }
-  return out;
 }

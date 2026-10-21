@@ -1,7 +1,19 @@
 import { ROOM_TYPES } from './roomTypes.js';
 import { uid } from '../utils.js';
 import { STAIR_DIRS, STAIR_SHAPES } from './stairs.js';
-import { clampCut, CUT_CORNERS, nearestOnPolygon, pointInPolygon, ROOM_SHAPES, roomPolygon, roomShape } from './shape.js';
+import {
+  clampCut,
+  CUT_CORNERS,
+  localPolygon,
+  nearestOnPolygon,
+  normalizeRotation,
+  pointInPolygon,
+  ROOM_SHAPES,
+  roomBounds,
+  roomToWorld,
+  roomShape,
+} from './shape.js';
+import { normalizeWall } from './freeWalls.js';
 
 const num = (v, fallback) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
 
@@ -14,6 +26,7 @@ export function createRoom(props = {}) {
     z: 0,
     width: 4,
     depth: 4,
+    rotation: 0, // Grad, im Grundriss im Uhrzeigersinn um die Raummitte
     shape: 'rect', // 'rect' | 'l' | 'chamfer', siehe shape.js
     cutCorner: 'ne',
     cutW: 2,
@@ -29,6 +42,9 @@ export function createRoom(props = {}) {
     ...props,
   };
 }
+
+/** Bodentank oder Drucker (x/z relativ zum ungedrehten Raum) → Weltkoordinaten. */
+export const itemWorld = (room, item) => roomToWorld(room, [room.x + item.x, room.z + item.z]);
 
 export const TANK_SIZE = 0.4;
 
@@ -81,7 +97,7 @@ function pushInside(item, room, poly, half) {
 
 /** Hält Bodentanks und Drucker innerhalb des Raums. */
 export function clampItems(room) {
-  const poly = roomShape(room) === 'rect' ? null : roomPolygon(room);
+  const poly = roomShape(room) === 'rect' ? null : localPolygon(room);
   for (const t of room.tanks) {
     if (poly) pushInside(t, room, poly, TANK_SIZE / 2);
     t.x = clampIn(t.x, TANK_SIZE / 2, room.width);
@@ -154,15 +170,22 @@ export function groundIndex(building) {
   return Math.max(0, building.floors.findIndex((f) => f.id === building.groundFloorId));
 }
 
-/** Bounding box of all rooms of a floor, or null if the floor is empty. */
+/** Bounding box of all rooms and free walls of a floor, or null if the floor is empty. */
 export function floorBounds(floor) {
-  if (!floor.rooms.length) return null;
+  if (!floor.rooms.length && !floor.walls?.length) return null;
   const b = { minX: Infinity, minZ: Infinity, maxX: -Infinity, maxZ: -Infinity };
   for (const r of floor.rooms) {
-    b.minX = Math.min(b.minX, r.x);
-    b.minZ = Math.min(b.minZ, r.z);
-    b.maxX = Math.max(b.maxX, r.x + r.width);
-    b.maxZ = Math.max(b.maxZ, r.z + r.depth);
+    const rb = roomBounds(r);
+    b.minX = Math.min(b.minX, rb.minX);
+    b.minZ = Math.min(b.minZ, rb.minZ);
+    b.maxX = Math.max(b.maxX, rb.maxX);
+    b.maxZ = Math.max(b.maxZ, rb.maxZ);
+  }
+  for (const w of floor.walls ?? []) {
+    b.minX = Math.min(b.minX, w.x1, w.x2);
+    b.minZ = Math.min(b.minZ, w.z1, w.z2);
+    b.maxX = Math.max(b.maxX, w.x1, w.x2);
+    b.maxZ = Math.max(b.maxZ, w.z1, w.z2);
   }
   return b;
 }
@@ -209,6 +232,7 @@ export function normalizeBuilding(data) {
     ...(Array.isArray(f.openings) && f.openings.length
       ? { openings: f.openings.map(normalizeOpening).filter(Boolean) }
       : {}),
+    ...(Array.isArray(f.walls) && f.walls.length ? { walls: f.walls.map(normalizeWall).filter(Boolean) } : {}),
     rooms: (Array.isArray(f.rooms) ? f.rooms : []).map((r) => ({
       id: r.id || uid('r'),
       name: String(r.name ?? 'Raum'),
@@ -217,6 +241,7 @@ export function normalizeBuilding(data) {
       z: num(r.z, 0),
       width: Math.max(0.5, num(r.width, 4)),
       depth: Math.max(0.5, num(r.depth, 4)),
+      rotation: normalizeRotation(r.rotation),
       shape: ROOM_SHAPES[r.shape] ? r.shape : 'rect',
       cutCorner: CUT_CORNERS[r.cutCorner] ? r.cutCorner : 'ne',
       cutW: num(r.cutW, 2),
